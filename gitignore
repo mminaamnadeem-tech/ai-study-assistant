@@ -1,0 +1,12 @@
+# Secrets
+.env
+*.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local/runtime files
+*.log
