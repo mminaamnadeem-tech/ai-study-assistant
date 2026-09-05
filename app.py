@@ -12,7 +12,7 @@ from groq import Groq
 # PATHS
 # =========================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent
 VECTORSTORE_DIR = BASE_DIR / "vectorstore"
 
 
