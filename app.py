@@ -4,12 +4,42 @@ from pathlib import Path
 import faiss
 import numpy as np
 import streamlit as st
-from groq import Groq
 from sentence_transformers import SentenceTransformer
+from groq import Groq
 
 
 # =========================================================
-# APP CONFIGURATION
+# PATHS
+# =========================================================
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+VECTORSTORE_DIR = BASE_DIR / "vectorstore"
+
+
+# =========================================================
+# SETTINGS
+# =========================================================
+
+SUPPORTED_SUBJECTS = ["Physics", "Chemistry", "Biology"]
+
+SUBJECT_KEYS = {
+    "Physics": "physics",
+    "Chemistry": "chemistry",
+    "Biology": "biology",
+}
+
+GROQ_MODEL = "openai/gpt-oss-120b"
+TOP_K = 5
+
+# Your FAISS indexes appear to use L2 distance.
+# Lower distance = more relevant.
+L2_DISTANCE_THRESHOLD = 0.80
+
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+# =========================================================
+# PAGE
 # =========================================================
 
 st.set_page_config(
@@ -18,24 +48,9 @@ st.set_page_config(
     layout="centered",
 )
 
-SUPPORTED_SUBJECTS = {
-    "Physics": "physics",
-    "Chemistry": "chemistry",
-    "Biology": "biology",
-}
-
-GROQ_MODEL = "openai/gpt-oss-120b"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-
-TOP_K = 5
-SIMILARITY_THRESHOLD = 0.30
-
-BASE_DIR = Path(__file__).resolve().parent
-VECTORSTORE_DIR = BASE_DIR / "vectorstore"
-
 
 # =========================================================
-# LOAD MODELS / API
+# EMBEDDING MODEL
 # =========================================================
 
 @st.cache_resource
@@ -43,50 +58,48 @@ def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL)
 
 
+embedding_model = load_embedding_model()
+
+
+# =========================================================
+# GROQ
+# =========================================================
+
 @st.cache_resource
 def load_groq_client():
-    api_key = st.secrets.get("GROQ_API_KEY")
-
-    if not api_key:
-        raise RuntimeError(
-            "GROQ_API_KEY is not configured. "
-            "Add it in Streamlit Cloud → Settings → Secrets."
-        )
-
+    api_key = st.secrets["GROQ_API_KEY"]
     return Groq(api_key=api_key)
 
 
+groq_client = load_groq_client()
+
+
 # =========================================================
-# LOAD SUBJECT-SPECIFIC FAISS INDEX
+# LOAD VECTORSTORE
 # =========================================================
 
 @st.cache_resource
-def load_subject_index(subject_key):
-    subject_dir = VECTORSTORE_DIR / subject_key
+def load_subject_index(subject):
+
+    subject_dir = VECTORSTORE_DIR / subject
 
     index_path = subject_dir / "index.faiss"
     metadata_path = subject_dir / "metadata.json"
 
     if not index_path.exists():
         raise FileNotFoundError(
-            f"Missing FAISS index: {index_path}"
+            f"FAISS index not found: {index_path}"
         )
 
     if not metadata_path.exists():
         raise FileNotFoundError(
-            f"Missing metadata file: {metadata_path}"
+            f"Metadata not found: {metadata_path}"
         )
 
     index = faiss.read_index(str(index_path))
 
-    with open(metadata_path, "r", encoding="utf-8") as file:
-        metadata = json.load(file)
-
-    if index.ntotal != len(metadata):
-        raise RuntimeError(
-            f"Index/metadata mismatch for {subject_key}: "
-            f"{index.ntotal} vectors vs {len(metadata)} metadata entries."
-        )
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
 
     return index, metadata
 
@@ -95,123 +108,141 @@ def load_subject_index(subject_key):
 # RETRIEVAL
 # =========================================================
 
-def retrieve_context(question, subject_key, top_k=TOP_K):
-    model = load_embedding_model()
-    index, metadata = load_subject_index(subject_key)
+def retrieve_context(question, subject, top_k=TOP_K):
 
-    query_embedding = model.encode(
+    query_embedding = embedding_model.encode(
         [question],
-        normalize_embeddings=True,
+        normalize_embeddings=True
     )
 
     query_embedding = np.asarray(
         query_embedding,
-        dtype="float32",
+        dtype="float32"
     )
 
-    scores, indices = index.search(query_embedding, top_k)
+    index, metadata = load_subject_index(subject)
+
+    distances, indices = index.search(
+        query_embedding,
+        top_k
+    )
 
     results = []
 
-    for score, idx in zip(scores[0], indices[0]):
+    for distance, idx in zip(
+        distances[0],
+        indices[0]
+    ):
+
         if idx == -1:
             continue
 
-        score = float(score)
-
-        if score < SIMILARITY_THRESHOLD:
-            continue
-
         result = metadata[idx].copy()
-        result["score"] = score
-        results.append(result)
+        result["score"] = float(distance)
+
+        # L2 distance: smaller = better
+        if distance <= L2_DISTANCE_THRESHOLD:
+            results.append(result)
 
     return results
 
 
 # =========================================================
-# GROQ GENERATION
+# GENERATE ANSWER
 # =========================================================
 
-def generate_answer(question, subject_name, subject_key, answer_mode):
+def generate_answer(question, subject, answer_mode):
+
     results = retrieve_context(
-        question=question,
-        subject_key=subject_key,
-        top_k=TOP_K,
+        question,
+        subject,
+        TOP_K
     )
 
-    # No sufficiently relevant textbook evidence.
     if not results:
         return (
-            "I couldn't find this information in the selected textbook.",
-            [],
-        )
+            "I couldn't find this information in the selected textbook."
+        ), []
 
     context_parts = []
 
     for result in results:
-        page = result.get("metadata", {}).get("page", "Unknown")
-        text = result.get("text", "").strip()
 
-        if text:
-            context_parts.append(
-                f"SOURCE PAGE: {page}\n{text}"
-            )
+        page = result.get("metadata", {}).get(
+            "page",
+            "Unknown"
+        )
 
-    context = "\n\n---\n\n".join(context_parts)
+        text = result.get("text", "")
+
+        context_parts.append(
+            f"SOURCE PAGE: {page}\n{text}"
+        )
+
+    context = "\n\n".join(context_parts)
 
     system_prompt = """
-You are a textbook-grounded AI Study Assistant for Class 11 students.
+You are an AI Study Assistant for Class 11 students.
 
 STRICT RULES:
 
 1. Answer ONLY from the supplied textbook context.
+
 2. Do NOT use outside knowledge.
+
 3. Do NOT use internet knowledge.
-4. Do NOT invent facts, definitions, formulas, examples,
-   explanations, or conclusions.
-5. Do NOT use information from another subject.
-6. Do NOT assume information that is not supported by the
-   supplied context.
-7. If the supplied textbook context is insufficient to answer
-   the question, respond exactly:
-   "I couldn't find this information in the selected textbook."
-8. Stay faithful to the textbook's terminology and content.
-9. Do not claim a page/source contains information unless it
-   is actually present in the supplied context.
-10. Answer at a Class 11 student level.
+
+4. Do NOT invent facts, definitions, formulas,
+examples, explanations, or conclusions.
+
+5. Use ONLY the selected subject's textbook.
+
+6. If the supplied context does not contain
+enough information to answer the question, say:
+
+"I couldn't find this information in the selected textbook."
+
+7. Stay faithful to the textbook.
+
+8. Answer at a clear Class 11 student level.
+
+9. If the question asks for something not supported
+by the supplied context, do not guess.
 """
 
     if answer_mode == "Explanation":
+
         mode_instruction = """
 Explain the answer clearly and step-by-step.
-Include definitions, formulas, concepts, and textbook examples
-only when they are supported by the supplied context.
+Use definitions, concepts, formulas and examples
+only when supported by the textbook context.
 """
 
     elif answer_mode == "Summary":
+
         mode_instruction = """
-Give a concise revision-oriented summary.
-Focus on key points, definitions, concepts, formulas, and facts
-supported by the supplied textbook context.
+Give a concise revision-oriented answer.
+Focus on important definitions, concepts,
+formulas and facts supported by the textbook.
 """
 
     else:
+
         mode_instruction = """
-Create a quiz using ONLY the supplied textbook context.
+Create a quiz ONLY from the supplied textbook context.
 
 Include:
 - MCQs
 - Short questions
 - Conceptual questions
 
-Provide the answers after the questions.
-Do not introduce information outside the textbook.
+Provide answers after the questions.
+Do not introduce outside information.
 """
 
     user_prompt = f"""
 SELECTED SUBJECT:
-{subject_name}
+{subject}
 
 ANSWER MODE:
 {answer_mode}
@@ -226,115 +257,137 @@ MODE INSTRUCTIONS:
 {mode_instruction}
 """
 
-    client = load_groq_client()
-
-    response = client.chat.completions.create(
+    response = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
             {
                 "role": "system",
-                "content": system_prompt,
+                "content": system_prompt
             },
             {
                 "role": "user",
-                "content": user_prompt,
-            },
+                "content": user_prompt
+            }
         ],
-        temperature=0.1,
+        temperature=0.1
     )
 
-    answer = response.choices[0].message.content.strip()
+    answer = response.choices[0].message.content
 
     return answer, results
 
 
 # =========================================================
-# USER INTERFACE
+# UI
 # =========================================================
 
 st.title("📚 AI Study Assistant")
 
-st.caption(
-    "Class 11 textbook-grounded study assistant"
+st.write(
+    "Ask questions directly from your Class 11 textbooks."
 )
 
 st.divider()
 
+
 st.subheader("Step 1 — Class")
+
 st.selectbox(
     "Select Class",
-    ["Class 11"],
-    disabled=True,
+    ["Class 11"]
 )
+
 
 st.subheader("Step 2 — Subject")
 
 selected_subject_name = st.selectbox(
     "Select Subject",
-    list(SUPPORTED_SUBJECTS.keys()),
+    SUPPORTED_SUBJECTS
 )
 
-selected_subject_key = SUPPORTED_SUBJECTS[
+selected_subject = SUBJECT_KEYS[
     selected_subject_name
 ]
+
 
 st.subheader("Step 3 — Ask your Question")
 
 question = st.text_area(
     "Enter your question:",
-    placeholder="Example: What is momentum?",
-    height=120,
+    placeholder="Example: Explain photosynthesis",
+    height=120
 )
+
 
 st.subheader("Step 4 — Answer Format")
 
 answer_mode = st.radio(
     "Choose answer format:",
-    ["Explanation", "Summary", "Quiz"],
-    horizontal=True,
+    [
+        "Explanation",
+        "Summary",
+        "Quiz"
+    ],
+    horizontal=True
 )
+
 
 ask_button = st.button(
     "🤖 Ask AI",
     type="primary",
-    use_container_width=True,
+    use_container_width=True
 )
 
+
+# =========================================================
+# PROCESS
+# =========================================================
+
 if ask_button:
+
     if not question.strip():
+
         st.warning("Please enter a question first.")
+
     else:
+
         with st.spinner(
-            f"Searching the Class 11 {selected_subject_name} textbook..."
+            f"Searching {selected_subject_name} textbook..."
         ):
+
             try:
+
                 answer, sources = generate_answer(
-                    question=question.strip(),
-                    subject_name=selected_subject_name,
-                    subject_key=selected_subject_key,
-                    answer_mode=answer_mode,
+                    question.strip(),
+                    selected_subject,
+                    answer_mode
                 )
 
                 st.divider()
+
                 st.subheader("Answer")
+
                 st.write(answer)
 
                 if sources:
-                    st.divider()
-                    st.subheader("📖 Textbook Source")
 
-                    shown_pages = set()
+                    with st.expander("📖 Textbook Sources"):
 
-                    for source in sources:
-                        metadata = source.get("metadata", {})
-                        page = metadata.get("page", "Unknown")
+                        for source in sources:
 
-                        if page not in shown_pages:
-                            st.write(
-                                f"Class 11 {selected_subject_name} "
-                                f"— Page {page}"
+                            page = source.get(
+                                "metadata", {}
+                            ).get(
+                                "page",
+                                "Unknown"
                             )
-                            shown_pages.add(page)
 
-            except Exception as error:
-                st.error(f"Application error: {error}")
+                            st.write(
+                                f"**Page {page}**"
+                            )
+
+            except Exception as e:
+
+                st.error(
+                    f"Something went wrong: {str(e)}"
+                )
