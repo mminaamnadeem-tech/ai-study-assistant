@@ -145,6 +145,7 @@ def generate_answer(question, subject, answer_mode):
         subject,
         TOP_K
     )
+    st.write("DEBUG RESULTS COUNT:", len(results))
 
     if not results:
         return (
