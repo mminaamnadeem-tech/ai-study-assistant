@@ -118,23 +118,34 @@ def retrieve_context(question, subject, top_k=TOP_K):
 
     scores, indices = index.search(query_embedding, top_k)
 
-    st.write("DEBUG scores:", scores)
-    st.write("DEBUG indices:", indices)
-
     results = []
 
+    question_words = set(question.lower().split())
+
+    # First: semantic results
     for score, idx in zip(scores[0], indices[0]):
         if idx == -1:
             continue
 
         result = metadata[idx].copy()
+        text = result.get("text", "").lower()
+
+        # Count question-word matches in textbook text
+        keyword_matches = sum(
+            1 for word in question_words
+            if len(word) > 3 and word in text
+        )
+
         result["score"] = float(score)
+        result["keyword_matches"] = keyword_matches
+
         results.append(result)
-        st.write(
-    "DEBUG RESULT:",
-    result.get("metadata", {}).get("page"),
-    result.get("text", "")[:300]
-)
+
+    # Rank using both semantic score and keyword matches
+    results.sort(
+        key=lambda x: (x["keyword_matches"], x["score"]),
+        reverse=True
+    )
 
     return results    
 
