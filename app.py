@@ -108,38 +108,27 @@ def load_subject_index(subject):
 # =========================================================
 
 def retrieve_context(question, subject, top_k=TOP_K):
-
     query_embedding = embedding_model.encode(
         [question],
         normalize_embeddings=True
     )
-
-    query_embedding = np.asarray(
-        query_embedding,
-        dtype="float32"
-    )
+    query_embedding = np.asarray(query_embedding, dtype="float32")
 
     index, metadata = load_subject_index(subject)
 
-    distances, indices = index.search(
-        query_embedding,
-        top_k
-    )
+    scores, indices = index.search(query_embedding, top_k)
 
     results = []
-for score, idx in zip(
-    distances[0],
-    indices[0]
-):
 
-    if idx == -1:
-        continue
+    for score, idx in zip(scores[0], indices[0]):
+        if idx == -1:
+            continue
 
-    result = metadata[idx].copy()
-    result["score"] = float(score)
-    results.append(result)
+        result = metadata[idx].copy()
+        result["score"] = float(score)
+        results.append(result)
 
-return results
+    return results    
 
 
 # =========================================================
