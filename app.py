@@ -27,7 +27,6 @@ SUBJECT_KEYS = {
     "Chemistry": "chem",
     "Biology": "bio",
 }
-}
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 5
