@@ -118,6 +118,9 @@ def retrieve_context(question, subject, top_k=TOP_K):
 
     scores, indices = index.search(query_embedding, top_k)
 
+    st.write("DEBUG scores:", scores)
+    st.write("DEBUG indices:", indices)
+
     results = []
 
     for score, idx in zip(scores[0], indices[0]):
