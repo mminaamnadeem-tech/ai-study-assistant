@@ -244,15 +244,24 @@ do not guess.
 13. Write formulas in plain text.
 Example: p = mv
 
-14. ALWAYS end the answer with:
+14. ALWAYS end every answer with this exact heading:
 
 ### In Short:
 
-15. After "### In Short:" give a short revision summary.
+15. The "In Short" section must be detailed but concise.
 
-16. NEVER omit the "### In Short:" section.
+16. The "In Short" section should normally contain
+4-6 sentences or short bullet points.
 
-17. Use ONLY information from the supplied textbook context.
+17. The "In Short" section should include the main
+definition, important formula(s), key concept(s),
+important law(s), and essential relationships
+covered in the answer.
+
+18. NEVER omit the "### In Short:" section.
+
+19. The "In Short" section must use ONLY information
+supported by the supplied textbook context.
 """
 
     if answer_mode == "Explanation":
@@ -260,16 +269,29 @@ Example: p = mv
         mode_instruction = """
 Explain the answer clearly and step-by-step.
 
-Use only information supported by the textbook.
+Use definitions, concepts, formulas and examples
+only when supported by the textbook context.
 
-Use plain text formulas such as:
+Keep formatting simple and readable.
+
+Write formulas in plain text.
+For example:
 p = mv
 
-Always finish with:
+At the end, ALWAYS add:
 
 ### In Short:
 
-Give a brief 1-3 sentence revision summary.
+Give a detailed but concise revision summary.
+
+Include the main definition, important formula(s),
+key concept(s), important law(s), and essential
+relationships or conclusions from the answer.
+
+Use 4-6 sentences or short bullet points.
+
+Do not introduce any information not present
+in the textbook context.
 """
 
     elif answer_mode == "Summary":
@@ -278,15 +300,23 @@ Give a brief 1-3 sentence revision summary.
 Give a concise revision-oriented answer.
 
 Focus on important definitions, concepts,
-formulas and facts from the textbook.
+formulas, laws and facts supported by the textbook.
 
-Use plain text formulas.
+Keep formatting simple and readable.
 
-Always finish with:
+Write formulas in plain text.
+
+At the end, ALWAYS add:
 
 ### In Short:
 
-Give a very brief revision summary.
+Give a detailed revision summary covering the main
+definitions, formulas, laws, concepts and important
+relationships discussed in the answer.
+
+Use 4-6 sentences or short bullet points.
+
+Use ONLY information from the textbook context.
 """
 
     else:
@@ -303,12 +333,18 @@ Provide answers after the questions.
 
 Do not introduce outside information.
 
-Always finish with:
+Keep formatting simple and readable.
+
+At the end, ALWAYS add:
 
 ### In Short:
 
-Give a brief summary of the main concepts
-covered in the quiz.
+Summarize the important concepts, definitions,
+formulas and laws covered in the quiz.
+
+Use 4-6 sentences or short bullet points.
+
+Use ONLY information from the textbook context.
 """
 
     user_prompt = f"""
@@ -327,15 +363,28 @@ TEXTBOOK CONTEXT:
 MODE INSTRUCTIONS:
 {mode_instruction}
 
-FINAL REQUIREMENT:
+FINAL REQUIREMENTS:
 
-Your response MUST end with:
+1. Answer ONLY using the supplied textbook context.
+
+2. Use simple, clean and readable formatting.
+
+3. Do NOT use LaTeX.
+
+4. Write formulas in plain text.
+
+5. Your response MUST end with:
 
 ### In Short:
 
-Followed by a short, clear revision summary.
+6. After "### In Short:", provide a detailed but
+concise revision summary covering the important
+points of the answer.
 
-Use plain text only. Do NOT use LaTeX.
+7. The In Short section should normally contain
+4-6 sentences or short bullet points.
+
+8. Do not use information outside the textbook context.
 """
 
     response = groq_client.chat.completions.create(
