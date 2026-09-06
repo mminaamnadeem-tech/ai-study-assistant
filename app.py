@@ -33,8 +33,7 @@ TOP_K = 5
 
 # Your FAISS indexes appear to use L2 distance.
 # Lower distance = more relevant.
-L2_DISTANCE_THRESHOLD = 0.80
-
+L2_DISTANCE_THRESHOLD = 1.50
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
