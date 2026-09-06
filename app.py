@@ -176,7 +176,6 @@ def retrieve_context(question, subject, top_k=TOP_K):
 # =========================================================
 # GENERATE ANSWER
 # =========================================================
-
 def generate_answer(question, subject, answer_mode):
 
     results = retrieve_context(
@@ -184,7 +183,6 @@ def generate_answer(question, subject, answer_mode):
         subject,
         TOP_K
     )
-   
 
     if not results:
         return (
@@ -207,7 +205,6 @@ def generate_answer(question, subject, answer_mode):
         )
 
     context = "\n\n".join(context_parts)
-    
 
     system_prompt = """
 You are an AI Study Assistant for Class 11 students.
@@ -236,22 +233,49 @@ enough information to answer the question, say:
 
 9. If the question asks for something not supported
 by the supplied context, do not guess.
+
+10. ALWAYS end every answer with a section titled exactly:
+
+### In Short:
+
+11. The "In Short" section must contain a brief,
+clear summary of the complete answer for quick
+student revision.
+
+12. NEVER omit the "### In Short:" section.
+
+13. The "In Short" section must also use ONLY
+information supported by the supplied textbook context.
 """
 
     if answer_mode == "Explanation":
 
         mode_instruction = """
 Explain the answer clearly and step-by-step.
+
 Use definitions, concepts, formulas and examples
 only when supported by the textbook context.
+
+After the explanation, ALWAYS add:
+
+### In Short:
+
+Give a brief 1-3 sentence revision summary.
 """
 
     elif answer_mode == "Summary":
 
         mode_instruction = """
 Give a concise revision-oriented answer.
+
 Focus on important definitions, concepts,
 formulas and facts supported by the textbook.
+
+After the summary, ALWAYS add:
+
+### In Short:
+
+Give a very brief revision summary.
 """
 
     else:
@@ -265,7 +289,15 @@ Include:
 - Conceptual questions
 
 Provide answers after the questions.
+
 Do not introduce outside information.
+
+After the quiz, ALWAYS add:
+
+### In Short:
+
+Give a brief summary of the main concepts
+covered in the quiz.
 """
 
     user_prompt = f"""
@@ -283,6 +315,13 @@ TEXTBOOK CONTEXT:
 
 MODE INSTRUCTIONS:
 {mode_instruction}
+
+FINAL REQUIREMENT:
+Your response MUST end with:
+
+### In Short:
+
+Followed by a short, clear revision summary.
 """
 
     response = groq_client.chat.completions.create(
@@ -300,7 +339,7 @@ MODE INSTRUCTIONS:
         temperature=0.1
     )
 
-    answer = response.choices[0].message.content
+    answer = response.choices[0].message.content.strip()
 
     return answer, results
 
