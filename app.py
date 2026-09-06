@@ -234,53 +234,80 @@ enough information to answer the question, say:
 9. If the question asks for something not supported
 by the supplied context, do not guess.
 
-10. ALWAYS end every answer with a section titled exactly:
+10. Use simple, clean plain-text formatting.
+
+11. Do NOT use LaTeX formatting.
+
+12. Do NOT use commands such as:
+\\mathbf, \\frac, \\begin, \\end, or other LaTeX commands.
+
+13. Write formulas in simple text format.
+Example:
+p = mv
+
+14. Avoid unnecessary special symbols or complicated
+mathematical formatting.
+
+15. ALWAYS end every answer with this exact heading:
 
 ### In Short:
 
-11. The "In Short" section must contain a brief,
+16. The "In Short" section must contain a brief,
 clear summary of the complete answer for quick
 student revision.
 
-12. NEVER omit the "### In Short:" section.
+17. NEVER omit the "### In Short:" section.
 
-13. The "In Short" section must also use ONLY
+18. The "In Short" section must also use ONLY
 information supported by the supplied textbook context.
 """
 
-    if answer_mode == "Explanation":
 
-        mode_instruction = """
+if answer_mode == "Explanation":
+
+    mode_instruction = """
 Explain the answer clearly and step-by-step.
 
 Use definitions, concepts, formulas and examples
 only when supported by the textbook context.
 
-After the explanation, ALWAYS add:
+Keep formatting simple and readable.
+
+Write formulas in plain text.
+For example:
+p = mv
+
+At the end, ALWAYS add:
 
 ### In Short:
 
 Give a brief 1-3 sentence revision summary.
 """
 
-    elif answer_mode == "Summary":
 
-        mode_instruction = """
+elif answer_mode == "Summary":
+
+    mode_instruction = """
 Give a concise revision-oriented answer.
 
 Focus on important definitions, concepts,
 formulas and facts supported by the textbook.
 
-After the summary, ALWAYS add:
+Keep formatting simple and readable.
+
+Write formulas in plain text.
+
+At the end, ALWAYS add:
 
 ### In Short:
 
 Give a very brief revision summary.
 """
 
-    else:
 
-        mode_instruction = """
+else:
+
+    mode_instruction = """
 Create a quiz ONLY from the supplied textbook context.
 
 Include:
@@ -292,7 +319,9 @@ Provide answers after the questions.
 
 Do not introduce outside information.
 
-After the quiz, ALWAYS add:
+Keep formatting simple and readable.
+
+At the end, ALWAYS add:
 
 ### In Short:
 
@@ -300,7 +329,8 @@ Give a brief summary of the main concepts
 covered in the quiz.
 """
 
-    user_prompt = f"""
+
+user_prompt = f"""
 SELECTED SUBJECT:
 {subject}
 
@@ -316,34 +346,43 @@ TEXTBOOK CONTEXT:
 MODE INSTRUCTIONS:
 {mode_instruction}
 
-FINAL REQUIREMENT:
-Your response MUST end with:
+FINAL REQUIREMENTS:
+
+1. Answer ONLY using the supplied textbook context.
+
+2. Use simple, clean and readable formatting.
+
+3. Do NOT use LaTeX.
+
+4. Write formulas in plain text.
+
+5. Your response MUST end with:
 
 ### In Short:
 
-Followed by a short, clear revision summary.
+6. After "### In Short:" provide a short,
+clear revision summary.
 """
 
-    response = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ],
-        temperature=0.1
-    )
 
-    answer = response.choices[0].message.content.strip()
+response = groq_client.chat.completions.create(
+    model=GROQ_MODEL,
+    messages=[
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
+            "role": "user",
+            "content": user_prompt
+        }
+    ],
+    temperature=0.1
+)
 
-    return answer, results
+answer = response.choices[0].message.content.strip()
 
-
+return answer, results
 # =========================================================
 # UI
 # =========================================================
