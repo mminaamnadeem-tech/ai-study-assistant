@@ -184,7 +184,7 @@ def generate_answer(question, subject, answer_mode):
         subject,
         TOP_K
     )
-    st.write("DEBUG RESULTS COUNT:", len(results))
+   
 
     if not results:
         return (
@@ -207,7 +207,7 @@ def generate_answer(question, subject, answer_mode):
         )
 
     context = "\n\n".join(context_parts)
-    st.write("DEBUG CONTEXT:", context[:2000])
+    
 
     system_prompt = """
 You are an AI Study Assistant for Class 11 students.
