@@ -23,9 +23,10 @@ VECTORSTORE_DIR = BASE_DIR / "vectorstore"
 SUPPORTED_SUBJECTS = ["Physics", "Chemistry", "Biology"]
 
 SUBJECT_KEYS = {
-    "Physics": "physics",
-    "Chemistry": "chemistry",
-    "Biology": "biology",
+    "Physics": "phy",
+    "Chemistry": "chem",
+    "Biology": "bio",
+}
 }
 
 GROQ_MODEL = "openai/gpt-oss-120b"
