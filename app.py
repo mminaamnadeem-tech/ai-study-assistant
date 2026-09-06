@@ -130,6 +130,11 @@ def retrieve_context(question, subject, top_k=TOP_K):
         result = metadata[idx].copy()
         result["score"] = float(score)
         results.append(result)
+        st.write(
+    "DEBUG RESULT:",
+    result.get("metadata", {}).get("page"),
+    result.get("text", "")[:300]
+)
 
     return results    
 
