@@ -33,7 +33,7 @@ TOP_K = 5
 
 # Your FAISS indexes appear to use L2 distance.
 # Lower distance = more relevant.
-L2_DISTANCE_THRESHOLD = 1.50
+
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
@@ -127,23 +127,19 @@ def retrieve_context(question, subject, top_k=TOP_K):
     )
 
     results = []
+for score, idx in zip(
+    distances[0],
+    indices[0]
+):
 
-    for distance, idx in zip(
-        distances[0],
-        indices[0]
-    ):
+    if idx == -1:
+        continue
 
-        if idx == -1:
-            continue
+    result = metadata[idx].copy()
+    result["score"] = float(score)
+    results.append(result)
 
-        result = metadata[idx].copy()
-        result["score"] = float(distance)
-
-        # L2 distance: smaller = better
-        if distance <= L2_DISTANCE_THRESHOLD:
-            results.append(result)
-
-    return results
+return results
 
 
 # =========================================================
