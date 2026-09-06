@@ -231,83 +231,67 @@ enough information to answer the question, say:
 
 8. Answer at a clear Class 11 student level.
 
-9. If the question asks for something not supported
-by the supplied context, do not guess.
+9. If the question is not supported by the context,
+do not guess.
 
-10. Use simple, clean plain-text formatting.
+10. Use simple and clean formatting.
 
-11. Do NOT use LaTeX formatting.
+11. DO NOT use LaTeX.
 
-12. Do NOT use commands such as:
-\\mathbf, \\frac, \\begin, \\end, or other LaTeX commands.
+12. DO NOT use commands such as \\mathbf, \\frac,
+\\begin, \\end, or other LaTeX commands.
 
-13. Write formulas in simple text format.
-Example:
-p = mv
+13. Write formulas in plain text.
+Example: p = mv
 
-14. Avoid unnecessary special symbols or complicated
-mathematical formatting.
-
-15. ALWAYS end every answer with this exact heading:
+14. ALWAYS end the answer with:
 
 ### In Short:
 
-16. The "In Short" section must contain a brief,
-clear summary of the complete answer for quick
-student revision.
+15. After "### In Short:" give a short revision summary.
 
-17. NEVER omit the "### In Short:" section.
+16. NEVER omit the "### In Short:" section.
 
-18. The "In Short" section must also use ONLY
-information supported by the supplied textbook context.
+17. Use ONLY information from the supplied textbook context.
 """
 
+    if answer_mode == "Explanation":
 
-if answer_mode == "Explanation":
-
-    mode_instruction = """
+        mode_instruction = """
 Explain the answer clearly and step-by-step.
 
-Use definitions, concepts, formulas and examples
-only when supported by the textbook context.
+Use only information supported by the textbook.
 
-Keep formatting simple and readable.
-
-Write formulas in plain text.
-For example:
+Use plain text formulas such as:
 p = mv
 
-At the end, ALWAYS add:
+Always finish with:
 
 ### In Short:
 
 Give a brief 1-3 sentence revision summary.
 """
 
+    elif answer_mode == "Summary":
 
-elif answer_mode == "Summary":
-
-    mode_instruction = """
+        mode_instruction = """
 Give a concise revision-oriented answer.
 
 Focus on important definitions, concepts,
-formulas and facts supported by the textbook.
+formulas and facts from the textbook.
 
-Keep formatting simple and readable.
+Use plain text formulas.
 
-Write formulas in plain text.
-
-At the end, ALWAYS add:
+Always finish with:
 
 ### In Short:
 
 Give a very brief revision summary.
 """
 
+    else:
 
-else:
-
-    mode_instruction = """
+        mode_instruction = """
 Create a quiz ONLY from the supplied textbook context.
 
 Include:
@@ -319,9 +303,7 @@ Provide answers after the questions.
 
 Do not introduce outside information.
 
-Keep formatting simple and readable.
-
-At the end, ALWAYS add:
+Always finish with:
 
 ### In Short:
 
@@ -329,8 +311,7 @@ Give a brief summary of the main concepts
 covered in the quiz.
 """
 
-
-user_prompt = f"""
+    user_prompt = f"""
 SELECTED SUBJECT:
 {subject}
 
@@ -346,43 +327,35 @@ TEXTBOOK CONTEXT:
 MODE INSTRUCTIONS:
 {mode_instruction}
 
-FINAL REQUIREMENTS:
+FINAL REQUIREMENT:
 
-1. Answer ONLY using the supplied textbook context.
-
-2. Use simple, clean and readable formatting.
-
-3. Do NOT use LaTeX.
-
-4. Write formulas in plain text.
-
-5. Your response MUST end with:
+Your response MUST end with:
 
 ### In Short:
 
-6. After "### In Short:" provide a short,
-clear revision summary.
+Followed by a short, clear revision summary.
+
+Use plain text only. Do NOT use LaTeX.
 """
 
+    response = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        temperature=0.1
+    )
 
-response = groq_client.chat.completions.create(
-    model=GROQ_MODEL,
-    messages=[
-        {
-            "role": "system",
-            "content": system_prompt
-        },
-        {
-            "role": "user",
-            "content": user_prompt
-        }
-    ],
-    temperature=0.1
-)
+    answer = response.choices[0].message.content.strip()
 
-answer = response.choices[0].message.content.strip()
-
-return answer, results
+    return answer, results
 # =========================================================
 # UI
 # =========================================================
