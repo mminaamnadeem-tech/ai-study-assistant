@@ -108,46 +108,69 @@ def load_subject_index(subject):
 # =========================================================
 
 def retrieve_context(question, subject, top_k=TOP_K):
+    index, metadata = load_subject_index(subject)
+
+    question_words = [
+        word.lower().strip(".,?!:;()[]{}")
+        for word in question.split()
+        if len(word.strip(".,?!:;()[]{}")) > 3
+    ]
+
+    # Find textbook chunks containing question keywords
+    keyword_results = []
+
+    for idx, item in enumerate(metadata):
+        text = item.get("text", "").lower()
+
+        matches = sum(
+            1 for word in question_words
+            if word in text
+        )
+
+        if matches > 0:
+            result = item.copy()
+            result["score"] = float(matches)
+            result["keyword_matches"] = matches
+            result["_index"] = idx
+            keyword_results.append(result)
+
+    # Best keyword matches first
+    keyword_results.sort(
+        key=lambda x: x["keyword_matches"],
+        reverse=True
+    )
+
+    # If keyword search finds enough relevant textbook chunks
+    if keyword_results:
+        return keyword_results[:top_k]
+
+    # Fallback to semantic FAISS search
     query_embedding = embedding_model.encode(
         [question],
         normalize_embeddings=True
     )
-    query_embedding = np.asarray(query_embedding, dtype="float32")
 
-    index, metadata = load_subject_index(subject)
+    query_embedding = np.asarray(
+        query_embedding,
+        dtype="float32"
+    )
 
-    scores, indices = index.search(query_embedding, top_k)
+    scores, indices = index.search(
+        query_embedding,
+        top_k
+    )
 
     results = []
 
-    question_words = set(question.lower().split())
-
-    # First: semantic results
     for score, idx in zip(scores[0], indices[0]):
         if idx == -1:
             continue
 
         result = metadata[idx].copy()
-        text = result.get("text", "").lower()
-
-        # Count question-word matches in textbook text
-        keyword_matches = sum(
-            1 for word in question_words
-            if len(word) > 3 and word in text
-        )
-
         result["score"] = float(score)
-        result["keyword_matches"] = keyword_matches
-
         results.append(result)
 
-    # Rank using both semantic score and keyword matches
-    results.sort(
-        key=lambda x: (x["keyword_matches"], x["score"]),
-        reverse=True
-    )
-
-    return results    
+    return results   
 
 
 # =========================================================
