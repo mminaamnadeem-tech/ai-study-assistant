@@ -1,3 +1,4 @@
+```python
 import json
 from pathlib import Path
 
@@ -20,19 +21,22 @@ VECTORSTORE_DIR = BASE_DIR / "vectorstore"
 # SETTINGS
 # =========================================================
 
-SUPPORTED_SUBJECTS = ["Physics", "Chemistry", "Biology"]
+SUPPORTED_SUBJECTS = [
+    "Physics",
+    "Chemistry",
+    "Biology",
+    "Computer",
+]
 
 SUBJECT_KEYS = {
     "Physics": "phy",
     "Chemistry": "chem",
     "Biology": "bio",
+    "Computer": "computer",
 }
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 5
-
-# Your FAISS indexes appear to use L2 distance.
-# Lower distance = more relevant.
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -66,7 +70,9 @@ embedding_model = load_embedding_model()
 
 @st.cache_resource
 def load_groq_client():
+
     api_key = st.secrets["GROQ_API_KEY"]
+
     return Groq(api_key=api_key)
 
 
@@ -104,10 +110,31 @@ def load_subject_index(subject):
 
 
 # =========================================================
+# GET PAGE NUMBER
+# Compatible with old + new metadata formats
+# =========================================================
+
+def get_page_number(item):
+
+    # New Computer metadata format
+    if "page" in item:
+        return item["page"]
+
+    # Existing metadata format
+    metadata = item.get("metadata", {})
+
+    if isinstance(metadata, dict):
+        return metadata.get("page", "Unknown")
+
+    return "Unknown"
+
+
+# =========================================================
 # RETRIEVAL
 # =========================================================
 
 def retrieve_context(question, subject, top_k=TOP_K):
+
     index, metadata = load_subject_index(subject)
 
     question_words = [
@@ -116,22 +143,30 @@ def retrieve_context(question, subject, top_k=TOP_K):
         if len(word.strip(".,?!:;()[]{}")) > 3
     ]
 
-    # Find textbook chunks containing question keywords
+    # -----------------------------------------------------
+    # KEYWORD SEARCH
+    # -----------------------------------------------------
+
     keyword_results = []
 
     for idx, item in enumerate(metadata):
+
         text = item.get("text", "").lower()
 
         matches = sum(
-            1 for word in question_words
+            1
+            for word in question_words
             if word in text
         )
 
         if matches > 0:
+
             result = item.copy()
+
             result["score"] = float(matches)
             result["keyword_matches"] = matches
             result["_index"] = idx
+
             keyword_results.append(result)
 
     # Best keyword matches first
@@ -140,11 +175,18 @@ def retrieve_context(question, subject, top_k=TOP_K):
         reverse=True
     )
 
-    # If keyword search finds enough relevant textbook chunks
+    # -----------------------------------------------------
+    # USE KEYWORD RESULTS WHEN AVAILABLE
+    # -----------------------------------------------------
+
     if keyword_results:
+
         return keyword_results[:top_k]
 
-    # Fallback to semantic FAISS search
+    # -----------------------------------------------------
+    # FAISS SEMANTIC SEARCH FALLBACK
+    # -----------------------------------------------------
+
     query_embedding = embedding_model.encode(
         [question],
         normalize_embeddings=True
@@ -162,21 +204,33 @@ def retrieve_context(question, subject, top_k=TOP_K):
 
     results = []
 
-    for score, idx in zip(scores[0], indices[0]):
+    for score, idx in zip(
+        scores[0],
+        indices[0]
+    ):
+
         if idx == -1:
             continue
 
         result = metadata[idx].copy()
+
         result["score"] = float(score)
+        result["_index"] = int(idx)
+
         results.append(result)
 
-    return results   
+    return results
 
 
 # =========================================================
 # GENERATE ANSWER
 # =========================================================
-def generate_answer(question, subject, answer_mode):
+
+def generate_answer(
+    question,
+    subject,
+    answer_mode
+):
 
     results = retrieve_context(
         question,
@@ -185,26 +239,37 @@ def generate_answer(question, subject, answer_mode):
     )
 
     if not results:
+
         return (
             "I couldn't find this information in the selected textbook."
         ), []
+
+    # -----------------------------------------------------
+    # BUILD TEXTBOOK CONTEXT
+    # -----------------------------------------------------
 
     context_parts = []
 
     for result in results:
 
-        page = result.get("metadata", {}).get(
-            "page",
-            "Unknown"
-        )
+        page = get_page_number(result)
 
-        text = result.get("text", "")
+        text = result.get(
+            "text",
+            ""
+        )
 
         context_parts.append(
             f"SOURCE PAGE: {page}\n{text}"
         )
 
-    context = "\n\n".join(context_parts)
+    context = "\n\n".join(
+        context_parts
+    )
+
+    # =====================================================
+    # SYSTEM PROMPT
+    # =====================================================
 
     system_prompt = """
 You are an AI Study Assistant for Class 11 students.
@@ -263,6 +328,10 @@ covered in the answer.
 19. The "In Short" section must use ONLY information
 supported by the supplied textbook context.
 """
+
+    # =====================================================
+    # ANSWER MODE
+    # =====================================================
 
     if answer_mode == "Explanation":
 
@@ -347,6 +416,10 @@ Use 4-6 sentences or short bullet points.
 Use ONLY information from the textbook context.
 """
 
+    # =====================================================
+    # USER PROMPT
+    # =====================================================
+
     user_prompt = f"""
 SELECTED SUBJECT:
 {subject}
@@ -387,6 +460,10 @@ points of the answer.
 8. Do not use information outside the textbook context.
 """
 
+    # =====================================================
+    # GROQ REQUEST
+    # =====================================================
+
     response = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
@@ -405,6 +482,8 @@ points of the answer.
     answer = response.choices[0].message.content.strip()
 
     return answer, results
+
+
 # =========================================================
 # UI
 # =========================================================
@@ -418,6 +497,10 @@ st.write(
 st.divider()
 
 
+# =========================================================
+# STEP 1 — CLASS
+# =========================================================
+
 st.subheader("Step 1 — Class")
 
 st.selectbox(
@@ -425,6 +508,10 @@ st.selectbox(
     ["Class 11"]
 )
 
+
+# =========================================================
+# STEP 2 — SUBJECT
+# =========================================================
 
 st.subheader("Step 2 — Subject")
 
@@ -438,6 +525,10 @@ selected_subject = SUBJECT_KEYS[
 ]
 
 
+# =========================================================
+# STEP 3 — QUESTION
+# =========================================================
+
 st.subheader("Step 3 — Ask your Question")
 
 question = st.text_area(
@@ -446,6 +537,10 @@ question = st.text_area(
     height=120
 )
 
+
+# =========================================================
+# STEP 4 — ANSWER FORMAT
+# =========================================================
 
 st.subheader("Step 4 — Answer Format")
 
@@ -459,6 +554,10 @@ answer_mode = st.radio(
     horizontal=True
 )
 
+
+# =========================================================
+# ASK BUTTON
+# =========================================================
 
 ask_button = st.button(
     "🤖 Ask AI",
@@ -475,7 +574,9 @@ if ask_button:
 
     if not question.strip():
 
-        st.warning("Please enter a question first.")
+        st.warning(
+            "Please enter a question first."
+        )
 
     else:
 
@@ -497,17 +598,20 @@ if ask_button:
 
                 st.write(answer)
 
+                # -------------------------------------------------
+                # TEXTBOOK SOURCES
+                # -------------------------------------------------
+
                 if sources:
 
-                    with st.expander("📖 Textbook Sources"):
+                    with st.expander(
+                        "📖 Textbook Sources"
+                    ):
 
                         for source in sources:
 
-                            page = source.get(
-                                "metadata", {}
-                            ).get(
-                                "page",
-                                "Unknown"
+                            page = get_page_number(
+                                source
                             )
 
                             st.write(
@@ -519,3 +623,4 @@ if ask_button:
                 st.error(
                     f"Something went wrong: {str(e)}"
                 )
+```
