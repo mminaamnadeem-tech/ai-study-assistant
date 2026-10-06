@@ -1,4 +1,3 @@
-
 import json
 from pathlib import Path
 
@@ -48,8 +47,227 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 st.set_page_config(
     page_title="AI Study Assistant",
     page_icon="📚",
-    layout="centered",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
+
+
+def inject_app_styles():
+    st.markdown(
+        """
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        .stApp {
+            background: linear-gradient(165deg, #f8fafc 0%, #e0f2fe 45%, #f1f5f9 100%);
+            background-attachment: fixed;
+        }
+
+        .block-container {
+            max-width: 920px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+
+        /* Hero */
+        .cloud-hero {
+            text-align: center;
+            padding: 2.25rem 1.5rem 2rem;
+            margin-bottom: 1.75rem;
+            border-radius: 20px;
+            background: linear-gradient(135deg, #1e40af 0%, #2563eb 50%, #0ea5e9 100%);
+            box-shadow: 0 20px 50px -12px rgba(37, 99, 235, 0.45);
+            animation: heroFade 0.8s ease-out both;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .cloud-hero::before {
+            content: "";
+            position: absolute;
+            top: -50%;
+            right: -20%;
+            width: 60%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.12) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .cloud-hero-badge {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #dbeafe;
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.25);
+            padding: 0.35rem 0.85rem;
+            border-radius: 999px;
+            margin-bottom: 0.85rem;
+            backdrop-filter: blur(8px);
+        }
+
+        .cloud-hero h1 {
+            color: #ffffff !important;
+            font-size: 2.15rem !important;
+            font-weight: 700 !important;
+            margin: 0 0 0.5rem 0 !important;
+            letter-spacing: -0.02em;
+        }
+
+        .cloud-hero p {
+            color: #e0f2fe;
+            font-size: 1.05rem;
+            margin: 0;
+            line-height: 1.55;
+            max-width: 520px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* Step cards */
+        .step-card {
+            animation: slideUp 0.55s ease-out both;
+        }
+
+        .step-card-delay-1 { animation-delay: 0.08s; }
+        .step-card-delay-2 { animation-delay: 0.16s; }
+        .step-card-delay-3 { animation-delay: 0.24s; }
+        .step-card-delay-4 { animation-delay: 0.32s; }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 16px !important;
+            border: 1px solid rgba(148, 163, 184, 0.35) !important;
+            background: rgba(255, 255, 255, 0.82) !important;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 24px -4px rgba(15, 23, 42, 0.08);
+            transition: box-shadow 0.25s ease, transform 0.25s ease;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            box-shadow: 0 12px 32px -8px rgba(37, 99, 235, 0.15);
+        }
+
+        .step-header {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .step-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #2563eb, #0ea5e9);
+            color: white;
+            font-size: 0.8rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .step-title {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #0f172a;
+            margin: 0;
+        }
+
+        /* Primary button */
+        div.stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+            border: none !important;
+            border-radius: 12px !important;
+            padding: 0.75rem 1.5rem !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.02em;
+            box-shadow: 0 8px 24px -6px rgba(37, 99, 235, 0.5);
+            transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+        }
+
+        div.stButton > button[kind="primary"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 28px -6px rgba(37, 99, 235, 0.55) !important;
+        }
+
+        div.stButton > button[kind="primary"]:active {
+            transform: translateY(0);
+        }
+
+        /* Inputs */
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="textarea"] textarea {
+            border-radius: 10px !important;
+            border-color: #cbd5e1 !important;
+        }
+
+        div[data-baseweb="radio"] label {
+            background: #f8fafc;
+            border-radius: 10px;
+            padding: 0.35rem 0.5rem;
+            border: 1px solid #e2e8f0;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        /* Answer panel */
+        .answer-panel {
+            animation: slideUp 0.6s ease-out both;
+        }
+
+        .answer-panel div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-left: 4px solid #2563eb !important;
+            background: rgba(255, 255, 255, 0.95) !important;
+        }
+
+        /* Expander */
+        div[data-testid="stExpander"] {
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            background: rgba(255,255,255,0.7);
+        }
+
+        /* Divider subtle */
+        hr {
+            margin: 1.75rem 0 !important;
+            border-color: rgba(148, 163, 184, 0.35) !important;
+        }
+
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+
+        @keyframes heroFade {
+            from { opacity: 0; transform: translateY(-12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 640px) {
+            .cloud-hero h1 { font-size: 1.65rem !important; }
+            .block-container { padding-top: 1rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_app_styles()
 
 
 # =========================================================
@@ -488,37 +706,58 @@ points of the answer.
 # UI
 # =========================================================
 
-st.title("📚 AI Study Assistant")
-
-st.write(
-    "Ask questions directly from your Class 11 textbooks."
+st.markdown(
+    """
+    <div class="cloud-hero">
+        <span class="cloud-hero-badge">Class 11 · Cloud Learning</span>
+        <h1>📚 AI Study Assistant</h1>
+        <p>Ask questions directly from your Class 11 textbooks — grounded answers with source pages.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.divider()
+
+def step_heading(number, title):
+    st.markdown(
+        f"""
+        <div class="step-header">
+            <span class="step-num">{number}</span>
+            <p class="step-title">{title}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
 # STEP 1 — CLASS
 # =========================================================
 
-st.subheader("Step 1 — Class")
-
-st.selectbox(
-    "Select Class",
-    ["Class 11"]
-)
+st.markdown('<div class="step-card step-card-delay-1">', unsafe_allow_html=True)
+with st.container(border=True):
+    step_heading(1, "Class")
+    st.selectbox(
+        "Select Class",
+        ["Class 11"],
+        label_visibility="collapsed",
+    )
+st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================================================
 # STEP 2 — SUBJECT
 # =========================================================
 
-st.subheader("Step 2 — Subject")
-
-selected_subject_name = st.selectbox(
-    "Select Subject",
-    SUPPORTED_SUBJECTS
-)
+st.markdown('<div class="step-card step-card-delay-2">', unsafe_allow_html=True)
+with st.container(border=True):
+    step_heading(2, "Subject")
+    selected_subject_name = st.selectbox(
+        "Select Subject",
+        SUPPORTED_SUBJECTS,
+        label_visibility="collapsed",
+    )
+st.markdown("</div>", unsafe_allow_html=True)
 
 selected_subject = SUBJECT_KEYS[
     selected_subject_name
@@ -529,30 +768,39 @@ selected_subject = SUBJECT_KEYS[
 # STEP 3 — QUESTION
 # =========================================================
 
-st.subheader("Step 3 — Ask your Question")
-
-question = st.text_area(
-    "Enter your question:",
-    placeholder="Example: Explain photosynthesis",
-    height=120
-)
+st.markdown('<div class="step-card step-card-delay-3">', unsafe_allow_html=True)
+with st.container(border=True):
+    step_heading(3, "Ask your question")
+    question = st.text_area(
+        "Enter your question:",
+        placeholder="Example: Explain photosynthesis",
+        height=120,
+        label_visibility="collapsed",
+    )
+st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================================================
 # STEP 4 — ANSWER FORMAT
 # =========================================================
 
-st.subheader("Step 4 — Answer Format")
+st.markdown('<div class="step-card step-card-delay-4">', unsafe_allow_html=True)
+with st.container(border=True):
+    step_heading(4, "Answer format")
+    answer_mode = st.radio(
+        "Choose answer format:",
+        [
+            "Explanation",
+            "Summary",
+            "Quiz"
+        ],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+st.markdown("</div>", unsafe_allow_html=True)
 
-answer_mode = st.radio(
-    "Choose answer format:",
-    [
-        "Explanation",
-        "Summary",
-        "Quiz"
-    ],
-    horizontal=True
-)
+
+st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -562,7 +810,7 @@ answer_mode = st.radio(
 ask_button = st.button(
     "🤖 Ask AI",
     type="primary",
-    use_container_width=True
+    use_container_width=True,
 )
 
 
@@ -592,11 +840,12 @@ if ask_button:
                     answer_mode
                 )
 
+                st.markdown('<div class="answer-panel">', unsafe_allow_html=True)
                 st.divider()
 
-                st.subheader("Answer")
-
-                st.write(answer)
+                with st.container(border=True):
+                    st.markdown("#### Answer")
+                    st.markdown(answer)
 
                 # -------------------------------------------------
                 # TEXTBOOK SOURCES
@@ -605,7 +854,8 @@ if ask_button:
                 if sources:
 
                     with st.expander(
-                        "📖 Textbook Sources"
+                        "📖 Textbook Sources",
+                        expanded=False,
                     ):
 
                         for source in sources:
@@ -614,13 +864,14 @@ if ask_button:
                                 source
                             )
 
-                            st.write(
+                            st.markdown(
                                 f"**Page {page}**"
                             )
+
+                st.markdown("</div>", unsafe_allow_html=True)
 
             except Exception as e:
 
                 st.error(
                     f"Something went wrong: {str(e)}"
                 )
-
