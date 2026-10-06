@@ -1,18 +1,12 @@
 import json
 from pathlib import Path
+import time
 
 import faiss
 import numpy as np
 import streamlit as st
-from groq import Groq
 from sentence_transformers import SentenceTransformer
-
-# Must be the first Streamlit command in this file.
-st.set_page_config(
-    page_title="AI Study Assistant",
-    page_icon="📚",
-    layout="centered",
-)
+from groq import Groq
 
 
 # =========================================================
@@ -41,275 +35,61 @@ SUBJECT_KEYS = {
     "Computer": "computer",
 }
 
+SUBJECT_META = {
+    "Physics": {
+        "icon": "⚛️",
+        "color": "#6366F1",
+        "prompts": [
+            "Explain Newton's laws of motion with examples",
+            "What is the work-energy theorem?",
+            "State Kepler's laws of planetary motion",
+        ],
+    },
+    "Chemistry": {
+        "icon": "🧪",
+        "color": "#EC4899",
+        "prompts": [
+            "What are the postulates of Bohr's atomic model?",
+            "Explain periodic trends in ionization enthalpy",
+            "What is Hess's law of constant heat summation?",
+        ],
+    },
+    "Biology": {
+        "icon": "🧬",
+        "color": "#10B981",
+        "prompts": [
+            "Explain the fluid mosaic model of plasma membrane",
+            "What are the key stages of mitosis?",
+            "Describe the light reaction in photosynthesis",
+        ],
+    },
+    "Computer": {
+        "icon": "💻",
+        "color": "#06B6D4",
+        "prompts": [
+            "Explain binary search algorithm and its complexity",
+            "What are tuples vs lists in Python?",
+            "How does bubble sort work step-by-step?",
+        ],
+    },
+}
+
 GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 5
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def ui_container(bordered=False):
-    """Streamlit container; border= needs Streamlit 1.29+."""
-    if bordered:
-        try:
-            return st.container(border=True)
-        except TypeError:
-            return st.container()
-    return st.container()
+# =========================================================
+# PAGE CONFIGURATION
+# =========================================================
 
-
-def inject_app_styles():
-    st.markdown(
-        """
-        <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-        <style>
-        :root {
-            --bg: #fafafa;
-            --surface: #ffffff;
-            --border: #e4e4e7;
-            --text: #18181b;
-            --muted: #71717a;
-            --accent: #18181b;
-            --accent-soft: #f4f4f5;
-            --radius: 14px;
-            --shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 8px 24px rgba(24, 24, 27, 0.06);
-        }
-
-        html, body, [class*="css"] {
-            font-family: "Plus Jakarta Sans", system-ui, sans-serif;
-        }
-
-        .stApp {
-            background: var(--bg);
-            background-image:
-                radial-gradient(circle at 1px 1px, rgba(24, 24, 27, 0.04) 1px, transparent 0);
-            background-size: 24px 24px;
-        }
-
-        .block-container {
-            max-width: 760px;
-            padding-top: 1.25rem;
-            padding-bottom: 4rem;
-        }
-
-        .app-topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 1rem;
-            padding: 0.85rem 1rem;
-            margin: -1rem -1rem 1.5rem -1rem;
-            background: rgba(255, 255, 255, 0.85);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-        }
-
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 0.65rem;
-            min-width: 0;
-        }
-
-        .brand-icon {
-            width: 36px;
-            height: 36px;
-            border-radius: 10px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: var(--accent);
-            color: #fff;
-            font-size: 1rem;
-            flex-shrink: 0;
-        }
-
-        .brand-title {
-            margin: 0;
-            font-size: 0.98rem;
-            font-weight: 700;
-            color: var(--text);
-            line-height: 1.2;
-        }
-
-        .brand-sub {
-            margin: 0;
-            font-size: 0.78rem;
-            color: var(--muted);
-            line-height: 1.2;
-        }
-
-        .env-badge {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: var(--text);
-            background: var(--accent-soft);
-            border: 1px solid var(--border);
-            padding: 0.35rem 0.65rem;
-            border-radius: 999px;
-            white-space: nowrap;
-        }
-
-        .page-head h1 {
-            margin: 0;
-            font-size: 1.75rem;
-            font-weight: 700;
-            letter-spacing: -0.03em;
-            color: var(--text);
-        }
-
-        .page-head p {
-            margin: 0.35rem 0 0 0;
-            color: var(--muted);
-            font-size: 0.95rem;
-            line-height: 1.5;
-        }
-
-        .pill-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-            margin: 0 0 1.25rem 0;
-        }
-
-        .pill {
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: #3f3f46;
-            background: #fff;
-            border: 1px solid var(--border);
-            padding: 0.35rem 0.7rem;
-            border-radius: 999px;
-        }
-
-        .panel-title {
-            margin: 0 0 0.15rem 0;
-            font-size: 0.92rem;
-            font-weight: 700;
-            color: var(--text);
-        }
-
-        .panel-desc {
-            margin: 0 0 1rem 0;
-            font-size: 0.82rem;
-            color: var(--muted);
-        }
-
-        .field-label {
-            margin: 0.25rem 0 0.5rem 0;
-            font-size: 0.78rem;
-            font-weight: 700;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            color: #52525b;
-        }
-
-        .result-meta {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 0.75rem;
-            margin: 1.5rem 0 0.75rem 0;
-            padding-bottom: 0.65rem;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .result-meta-left {
-            display: flex;
-            align-items: center;
-            gap: 0.55rem;
-            min-width: 0;
-        }
-
-        .live-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #22c55e;
-            box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.15);
-            flex-shrink: 0;
-        }
-
-        .result-title {
-            margin: 0;
-            font-size: 0.92rem;
-            font-weight: 700;
-            color: var(--text);
-        }
-
-        .result-tag {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: #3f3f46;
-            background: #fff;
-            border: 1px solid var(--border);
-            padding: 0.28rem 0.55rem;
-            border-radius: 999px;
-            white-space: nowrap;
-        }
-
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-radius: var(--radius) !important;
-            border: 1px solid var(--border) !important;
-            background: var(--surface) !important;
-            box-shadow: var(--shadow);
-            padding-top: 0.75rem;
-            padding-bottom: 0.75rem;
-        }
-
-        div[data-baseweb="select"] > div,
-        div[data-baseweb="textarea"] textarea {
-            border-radius: 10px !important;
-            border-color: var(--border) !important;
-            background: #fff !important;
-        }
-
-        div[data-baseweb="radio"] > div {
-            gap: 0.45rem !important;
-        }
-
-        div[data-baseweb="radio"] label {
-            background: #fff !important;
-            border: 1px solid var(--border) !important;
-            border-radius: 10px !important;
-            padding: 0.45rem 0.75rem !important;
-        }
-
-        div.stButton > button[kind="primary"] {
-            background: var(--accent) !important;
-            color: #fff !important;
-            border: 1px solid var(--accent) !important;
-            border-radius: 12px !important;
-            min-height: 2.75rem;
-            font-weight: 700 !important;
-        }
-
-        div[data-testid="stExpander"] {
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            background: #fff;
-            box-shadow: var(--shadow);
-        }
-
-        hr {
-            margin: 1.25rem 0 !important;
-            border-color: var(--border) !important;
-        }
-
-        footer, #MainMenu { visibility: hidden; height: 0; }
-
-        @media (max-width: 640px) {
-            .app-topbar { flex-direction: column; align-items: flex-start; }
-            .page-head h1 { font-size: 1.45rem; }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-inject_app_styles()
+st.set_page_config(
+    page_title="AI Study Assistant | Class 11",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
 # =========================================================
@@ -330,7 +110,9 @@ embedding_model = load_embedding_model()
 
 @st.cache_resource
 def load_groq_client():
+
     api_key = st.secrets["GROQ_API_KEY"]
+
     return Groq(api_key=api_key)
 
 
@@ -374,9 +156,11 @@ def load_subject_index(subject):
 
 def get_page_number(item):
 
+    # New Computer metadata format
     if "page" in item:
         return item["page"]
 
+    # Existing metadata format
     metadata = item.get("metadata", {})
 
     if isinstance(metadata, dict):
@@ -398,6 +182,10 @@ def retrieve_context(question, subject, top_k=TOP_K):
         for word in question.split()
         if len(word.strip(".,?!:;()[]{}")) > 3
     ]
+
+    # -----------------------------------------------------
+    # KEYWORD SEARCH
+    # -----------------------------------------------------
 
     keyword_results = []
 
@@ -421,14 +209,23 @@ def retrieve_context(question, subject, top_k=TOP_K):
 
             keyword_results.append(result)
 
+    # Best keyword matches first
     keyword_results.sort(
         key=lambda x: x["keyword_matches"],
         reverse=True
     )
 
+    # -----------------------------------------------------
+    # USE KEYWORD RESULTS WHEN AVAILABLE
+    # -----------------------------------------------------
+
     if keyword_results:
 
         return keyword_results[:top_k]
+
+    # -----------------------------------------------------
+    # FAISS SEMANTIC SEARCH FALLBACK
+    # -----------------------------------------------------
 
     query_embedding = embedding_model.encode(
         [question],
@@ -487,6 +284,10 @@ def generate_answer(
             "I couldn't find this information in the selected textbook."
         ), []
 
+    # -----------------------------------------------------
+    # BUILD TEXTBOOK CONTEXT
+    # -----------------------------------------------------
+
     context_parts = []
 
     for result in results:
@@ -505,6 +306,10 @@ def generate_answer(
     context = "\n\n".join(
         context_parts
     )
+
+    # =====================================================
+    # SYSTEM PROMPT
+    # =====================================================
 
     system_prompt = """
 You are an AI Study Assistant for Class 11 students.
@@ -563,6 +368,10 @@ covered in the answer.
 19. The "In Short" section must use ONLY information
 supported by the supplied textbook context.
 """
+
+    # =====================================================
+    # ANSWER MODE
+    # =====================================================
 
     if answer_mode == "Explanation":
 
@@ -647,6 +456,10 @@ Use 4-6 sentences or short bullet points.
 Use ONLY information from the textbook context.
 """
 
+    # =====================================================
+    # USER PROMPT
+    # =====================================================
+
     user_prompt = f"""
 SELECTED SUBJECT:
 {subject}
@@ -687,6 +500,10 @@ points of the answer.
 8. Do not use information outside the textbook context.
 """
 
+    # =====================================================
+    # GROQ REQUEST
+    # =====================================================
+
     response = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
@@ -708,106 +525,597 @@ points of the answer.
 
 
 # =========================================================
-# UI
+# PREMIUM ANIMATED UI STYLES
+# =========================================================
+
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+    --bg-dark: #0a0e17;
+    --card-surface: rgba(18, 24, 38, 0.7);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --primary-indigo: #6366f1;
+    --primary-purple: #8b5cf6;
+    --primary-cyan: #06b6d4;
+    --text-primary: #f8fafc;
+    --text-muted: #94a3b8;
+}
+
+/* Background & Core Layout */
+html, body, [data-testid="stAppViewContainer"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    background-color: var(--bg-dark) !important;
+    color: var(--text-primary) !important;
+    background-image: 
+        radial-gradient(circle at 15% 15%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+        radial-gradient(circle at 85% 20%, rgba(139, 92, 246, 0.10) 0%, transparent 35%),
+        radial-gradient(circle at 50% 80%, rgba(6, 182, 212, 0.08) 0%, transparent 45%);
+    background-attachment: fixed;
+}
+
+/* Center and frame main container */
+.block-container {
+    max-width: 920px !important;
+    padding-top: 2rem !important;
+    padding-bottom: 5rem !important;
+    margin: 0 auto !important;
+}
+
+/* Hide default streamlit header/footer decorations */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
+#MainMenu, footer {
+    visibility: hidden;
+}
+
+/* Keyframe Animations */
+@keyframes fadeInSlideUp {
+    from {
+        opacity: 0;
+        transform: translateY(18px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes gradientFlow {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+@keyframes pulseGlow {
+    0%, 100% {
+        box-shadow: 0 0 15px rgba(99, 102, 241, 0.25);
+    }
+    50% {
+        box-shadow: 0 0 30px rgba(139, 92, 246, 0.45);
+    }
+}
+
+@keyframes badgeFloat {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-4px); }
+}
+
+/* Header Container */
+.hero-wrapper {
+    text-align: center;
+    padding: 2.2rem 1.5rem 1.8rem 1.5rem;
+    margin-bottom: 2rem;
+    background: rgba(17, 24, 39, 0.65);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--card-border);
+    border-radius: 24px;
+    box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+    animation: fadeInSlideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hero-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 9999px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: #a5b4fc;
+    margin-bottom: 1rem;
+    animation: badgeFloat 4s ease-in-out infinite;
+}
+
+.hero-title {
+    font-size: 2.75rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+    margin: 0.2rem 0 0.8rem 0;
+    background: linear-gradient(135deg, #ffffff 0%, #c7d2fe 40%, #818cf8 70%, #a855f7 100%);
+    background-size: 200% 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: gradientFlow 8s ease infinite;
+}
+
+.hero-subtitle {
+    font-size: 1.05rem;
+    color: var(--text-muted);
+    max-width: 620px;
+    margin: 0 auto 1.4rem auto;
+    line-height: 1.6;
+    font-weight: 400;
+}
+
+.feature-strip {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.feature-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+/* Step Card Headers */
+.step-header-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 0.65rem;
+    margin-top: 0.4rem;
+}
+
+.step-num-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #ffffff;
+    font-size: 0.82rem;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(99, 102, 241, 0.4);
+}
+
+.step-label {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #f1f5f9;
+    letter-spacing: -0.01em;
+}
+
+/* Streamlit Widget Customization */
+div[data-testid="stSelectbox"] > div {
+    background: rgba(18, 24, 38, 0.8) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 14px !important;
+    transition: all 0.25s ease !important;
+}
+
+div[data-testid="stSelectbox"] > div:hover {
+    border-color: rgba(99, 102, 241, 0.5) !important;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.15) !important;
+}
+
+div[data-testid="stTextArea"] textarea {
+    background: rgba(18, 24, 38, 0.85) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 16px !important;
+    color: #f8fafc !important;
+    font-size: 1rem !important;
+    padding: 14px 16px !important;
+    line-height: 1.6 !important;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25), 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* Custom Prompt Suggestion Chips */
+.chips-wrapper {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 0.8rem;
+    margin-top: 0.2rem;
+}
+
+.chip-title {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+}
+
+/* Primary Button Styling */
+div[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #2563eb 100%) !important;
+    background-size: 200% 200% !important;
+    border: none !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 1.05rem !important;
+    padding: 0.85rem 1.5rem !important;
+    border-radius: 14px !important;
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4) !important;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    animation: gradientFlow 6s ease infinite;
+}
+
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 30px rgba(124, 58, 237, 0.6) !important;
+}
+
+div[data-testid="stButton"] > button[kind="primary"]:active {
+    transform: translateY(1px) !important;
+}
+
+/* Secondary Chip Buttons */
+div[data-testid="stButton"] > button:not([kind="primary"]) {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 10px !important;
+    color: #cbd5e1 !important;
+    font-size: 0.8rem !important;
+    padding: 0.4rem 0.8rem !important;
+    transition: all 0.2s ease !important;
+}
+
+div[data-testid="stButton"] > button:not([kind="primary"]):hover {
+    background: rgba(99, 102, 241, 0.15) !important;
+    border-color: rgba(99, 102, 241, 0.4) !important;
+    color: #ffffff !important;
+    transform: translateY(-1px) !important;
+}
+
+/* Radio Button formatting */
+div[data-testid="stRadio"] > div {
+    gap: 16px !important;
+}
+
+div[data-testid="stRadio"] label {
+    background: rgba(18, 24, 38, 0.7) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    padding: 10px 18px !important;
+    border-radius: 12px !important;
+    transition: all 0.2s ease !important;
+}
+
+div[data-testid="stRadio"] label:hover {
+    border-color: rgba(99, 102, 241, 0.4) !important;
+}
+
+/* Answer Presentation Card */
+.answer-container {
+    background: rgba(17, 24, 39, 0.8);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 20px;
+    padding: 1.8rem;
+    margin-top: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6), 0 0 20px rgba(99, 102, 241, 0.15);
+    animation: fadeInSlideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.answer-top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-bottom: 1rem;
+    margin-bottom: 1.2rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.answer-badge-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.answer-badge {
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.badge-subject {
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+}
+
+.badge-mode {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #6ee7b7;
+}
+
+.badge-source {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fcd34d;
+}
+
+.in-short-banner {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(139, 92, 246, 0.15) 100%);
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    border-radius: 14px;
+    padding: 1.2rem;
+    margin-top: 1.5rem;
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.15);
+}
+
+.in-short-title {
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #c7d2fe;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Source Citation Card */
+.source-citation-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 12px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.75rem;
+    transition: all 0.25s ease;
+}
+
+.source-citation-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(99, 102, 241, 0.3);
+    transform: translateX(4px);
+}
+
+.source-page-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(99, 102, 241, 0.2);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    color: #a5b4fc;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 6px;
+    margin-bottom: 0.4rem;
+}
+
+.source-text-snippet {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    line-height: 1.5;
+    font-style: italic;
+}
+
+/* Expander Styling */
+div[data-testid="stExpander"] {
+    background: rgba(18, 24, 38, 0.6) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 16px !important;
+    overflow: hidden !important;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: rgba(10, 14, 23, 0.8);
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.35);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(99, 102, 241, 0.65);
+}
+</style>
+"""
+
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# =========================================================
+# STATE INITIALIZATION
+# =========================================================
+
+if "question_input_text" not in st.session_state:
+    st.session_state.question_input_text = ""
+
+
+# =========================================================
+# HERO HEADER
 # =========================================================
 
 st.markdown(
     """
-    <div class="app-topbar">
-        <div class="brand">
-            <span class="brand-icon">📚</span>
-            <div>
-                <p class="brand-title">Study Assistant</p>
-                <p class="brand-sub">Textbook-grounded workspace</p>
-            </div>
+    <div class="hero-wrapper">
+        <div class="hero-pill">
+            <span>✨</span> AI-POWERED TEXTBOOK INTELLIGENCE · CLASS 11
         </div>
-        <span class="env-badge">Class 11 · Cloud</span>
-    </div>
-
-    <div class="page-head">
-        <h1>Ask from your textbook</h1>
-        <p>Choose a subject, ask a question, and get an answer with page references.</p>
-    </div>
-
-    <div class="pill-row">
-        <span class="pill">Textbook-only answers</span>
-        <span class="pill">Source pages included</span>
-        <span class="pill">Explanation · Summary · Quiz</span>
+        <h1 class="hero-title">AI Study Assistant</h1>
+        <p class="hero-subtitle">
+            Ask questions directly from your Class 11 textbooks. Get instant, verified,
+            and zero-hallucination answers powered by high-speed Groq LPU inference.
+        </p>
+        <div class="feature-strip">
+            <div class="feature-badge">⚡ Instant Groq LPU Engine</div>
+            <div class="feature-badge">🔍 Hybrid Semantic + Keyword Search</div>
+            <div class="feature-badge">🛡️ Strict Textbook Verification</div>
+            <div class="feature-badge">📄 Page-Accurate Citations</div>
+        </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 
-with ui_container(bordered=True):
+# =========================================================
+# STEP 1 & STEP 2 — CLASS & SUBJECT (2-COLUMN GRID)
+# =========================================================
 
+col_step1, col_step2 = st.columns([1, 2], gap="medium")
+
+with col_step1:
     st.markdown(
         """
-        <p class="panel-title">New question</p>
-        <p class="panel-desc">Fill in the details below, then run the assistant.</p>
+        <div class="step-header-box">
+            <span class="step-num-badge">1</span>
+            <span class="step-label">Academic Class</span>
+        </div>
         """,
         unsafe_allow_html=True,
     )
-
-    col_class, col_subject = st.columns(2)
-
-    with col_class:
-
-        st.markdown('<p class="field-label">Step 1 — Class</p>', unsafe_allow_html=True)
-
-        st.selectbox(
-            "Select Class",
-            ["Class 11"],
-            label_visibility="collapsed",
-        )
-
-    with col_subject:
-
-        st.markdown('<p class="field-label">Step 2 — Subject</p>', unsafe_allow_html=True)
-
-        selected_subject_name = st.selectbox(
-            "Select Subject",
-            SUPPORTED_SUBJECTS,
-            label_visibility="collapsed",
-        )
-
-    selected_subject = SUBJECT_KEYS[
-        selected_subject_name
-    ]
-
-    st.divider()
-
-    st.markdown('<p class="field-label">Step 3 — Question</p>', unsafe_allow_html=True)
-
-    question = st.text_area(
-        "Enter your question:",
-        placeholder="Example: Explain photosynthesis",
-        height=140,
+    st.selectbox(
+        "Select Class",
+        ["Class 11"],
         label_visibility="collapsed",
     )
 
-    st.divider()
-
-    st.markdown('<p class="field-label">Step 4 — Answer format</p>', unsafe_allow_html=True)
-
-    answer_mode = st.radio(
-        "Choose answer format:",
-        [
-            "Explanation",
-            "Summary",
-            "Quiz"
-        ],
-        horizontal=True,
+with col_step2:
+    st.markdown(
+        """
+        <div class="step-header-box">
+            <span class="step-num-badge">2</span>
+            <span class="step-label">Select Subject</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    selected_subject_name = st.selectbox(
+        "Select Subject",
+        SUPPORTED_SUBJECTS,
+        format_func=lambda s: f"{SUBJECT_META.get(s, {}).get('icon', '📖')}  {s}",
         label_visibility="collapsed",
     )
 
-    st.divider()
+    selected_subject = SUBJECT_KEYS[selected_subject_name]
 
-    ask_button = st.button(
-        "🤖 Ask AI",
-        type="primary",
-        use_container_width=True,
-    )
+
+# =========================================================
+# STEP 3 — QUESTION INPUT & QUICK SUGGESTION CHIPS
+# =========================================================
+
+st.markdown(
+    """
+    <div class="step-header-box" style="margin-top: 1.2rem;">
+        <span class="step-num-badge">3</span>
+        <span class="step-label">Ask your Question</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Suggested question chips for active subject
+active_meta = SUBJECT_META.get(selected_subject_name, {})
+prompts = active_meta.get("prompts", [])
+
+st.markdown(
+    f'<div class="chip-title">💡 Popular {selected_subject_name} Inquiries (Click to autofill):</div>',
+    unsafe_allow_html=True,
+)
+
+chip_cols = st.columns(len(prompts))
+for idx, prompt_text in enumerate(prompts):
+    with chip_cols[idx]:
+        if st.button(
+            f"📌 {prompt_text[:28]}...",
+            key=f"chip_{selected_subject_name}_{idx}",
+            help=prompt_text,
+            use_container_width=True,
+        ):
+            st.session_state.question_input_text = prompt_text
+            st.rerun()
+
+question = st.text_area(
+    "Enter your question:",
+    value=st.session_state.question_input_text,
+    placeholder=f"Example: {prompts[0] if prompts else 'Explain photosynthesis'}",
+    height=120,
+    label_visibility="collapsed",
+)
+
+
+# =========================================================
+# STEP 4 — ANSWER FORMAT
+# =========================================================
+
+st.markdown(
+    """
+    <div class="step-header-box" style="margin-top: 1.2rem;">
+        <span class="step-num-badge">4</span>
+        <span class="step-label">Answer Format</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+answer_mode = st.radio(
+    "Choose answer format:",
+    [
+        "Explanation",
+        "Summary",
+        "Quiz"
+    ],
+    horizontal=True,
+    format_func=lambda mode: {
+        "Explanation": "💡 Explanation (Step-by-Step)",
+        "Summary": "⚡ Summary (High-Yield Revision)",
+        "Quiz": "🎯 Quiz (Practice & MCQs)",
+    }.get(mode, mode),
+    label_visibility="collapsed",
+)
+
+
+# =========================================================
+# ASK BUTTON
+# =========================================================
+
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+ask_button = st.button(
+    "🤖 Ask AI Study Assistant",
+    type="primary",
+    use_container_width=True
+)
 
 
 # =========================================================
@@ -819,16 +1127,17 @@ if ask_button:
     if not question.strip():
 
         st.warning(
-            "Please enter a question first."
+            "⚠️ Please enter a question or select a prompt suggestion first."
         )
 
     else:
 
         with st.spinner(
-            f"Searching {selected_subject_name} textbook..."
+            f"🔍 Searching official {selected_subject_name} textbook and synthesizing answer..."
         ):
 
             try:
+                start_time = time.time()
 
                 answer, sources = generate_answer(
                     question.strip(),
@@ -836,27 +1145,71 @@ if ask_button:
                     answer_mode
                 )
 
+                elapsed_time = round(time.time() - start_time, 2)
+
+                # Split answer and 'In Short' summary if present
+                main_answer = answer
+                in_short_summary = None
+
+                if "### In Short:" in answer:
+                    parts = answer.split("### In Short:")
+                    main_answer = parts[0].strip()
+                    in_short_summary = parts[1].strip()
+
+                # Render Answer Container
                 st.markdown(
                     f"""
-                    <div class="result-meta">
-                        <div class="result-meta-left">
-                            <span class="live-dot"></span>
-                            <p class="result-title">Answer</p>
+                    <div class="answer-container">
+                        <div class="answer-top-bar">
+                            <div class="answer-badge-group">
+                                <span class="answer-badge badge-subject">
+                                    {active_meta.get('icon', '📚')} {selected_subject_name}
+                                </span>
+                                <span class="answer-badge badge-mode">
+                                    {answer_mode} Mode
+                                </span>
+                                <span class="answer-badge badge-source">
+                                    ⚡ {elapsed_time}s
+                                </span>
+                            </div>
+                            <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 500;">
+                                Model: {GROQ_MODEL}
+                            </span>
                         </div>
-                        <span class="result-tag">{selected_subject_name} · {answer_mode}</span>
-                    </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
-                with ui_container(bordered=True):
-                    st.markdown(answer)
+                # Main Answer Markdown
+                st.markdown(main_answer)
+
+                # High-Yield Revision Callout
+                if in_short_summary:
+                    st.markdown(
+                        f"""
+                        <div class="in-short-banner">
+                            <div class="in-short-title">
+                                <span>⚡</span> In Short: High-Yield Revision Summary
+                            </div>
+                            <div style="color: #e0e7ff; font-size: 0.95rem; line-height: 1.6;">
+                                {in_short_summary}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                # -------------------------------------------------
+                # TEXTBOOK SOURCES
+                # -------------------------------------------------
 
                 if sources:
 
                     with st.expander(
-                        "📖 Textbook Sources",
-                        expanded=False,
+                        f"📖 Verified Textbook Sources ({len(sources)} Citations Found)",
+                        expanded=True
                     ):
 
                         for source in sources:
@@ -865,12 +1218,27 @@ if ask_button:
                                 source
                             )
 
+                            snippet = source.get("text", "").strip()
+                            clean_snippet = (
+                                snippet[:300] + "..."
+                                if len(snippet) > 300
+                                else snippet
+                            )
+
                             st.markdown(
-                                f"**Page {page}**"
+                                f"""
+                                <div class="source-citation-card">
+                                    <span class="source-page-tag">📄 PAGE {page}</span>
+                                    <div class="source-text-snippet">
+                                        "{clean_snippet}"
+                                    </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
                             )
 
             except Exception as e:
 
                 st.error(
-                    f"Something went wrong: {str(e)}"
+                    f"❌ Something went wrong: {str(e)}"
                 )
