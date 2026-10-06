@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 import time
 
@@ -173,58 +174,66 @@ def get_page_number(item):
 # RETRIEVAL
 # =========================================================
 
+def _normalize_words(text):
+    """Return normalized alphanumeric tokens for lightweight lexical search."""
+    return re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
+
+
+def _keyword_score(query_words, text):
+    """Score lexical overlap, with a small phrase bonus."""
+    text_words = set(_normalize_words(text))
+
+    if not query_words or not text_words:
+        return 0
+
+    matches = sum(1 for word in query_words if word in text_words)
+
+    # Phrase bonus rewards direct multi-word matches without making
+    # exact wording mandatory.
+    phrase = " ".join(query_words)
+    phrase_bonus = 2 if phrase and phrase in text.lower() else 0
+
+    return matches + phrase_bonus
+
+
 def retrieve_context(question, subject, top_k=TOP_K):
+    """
+    Hybrid semantic + keyword RAG retrieval.
+
+    Semantic search is the PRIMARY signal, so paraphrased questions can
+    retrieve textbook passages even when the exact words are different.
+    Keyword overlap is a secondary signal used for re-ranking.
+
+    Retrieval remains strictly subject-isolated because the FAISS index
+    is loaded only for the selected subject.
+    """
 
     index, metadata = load_subject_index(subject)
 
-    question_words = [
-        word.lower().strip(".,?!:;()[]{}")
-        for word in question.split()
-        if len(word.strip(".,?!:;()[]{}")) > 3
+    if index.ntotal == 0 or not metadata:
+        return []
+
+    # -----------------------------------------------------
+    # Normalize the query
+    # -----------------------------------------------------
+
+    raw_question_words = _normalize_words(question)
+
+    stop_words = {
+        "what", "is", "are", "the", "a", "an", "of", "to", "in",
+        "on", "for", "how", "why", "when", "where", "does", "do",
+        "explain", "define", "describe", "state", "tell", "me",
+        "about", "can", "you", "please", "with", "and", "or"
+    }
+
+    query_words = [
+        word
+        for word in raw_question_words
+        if len(word) >= 3 and word not in stop_words
     ]
 
     # -----------------------------------------------------
-    # KEYWORD SEARCH
-    # -----------------------------------------------------
-
-    keyword_results = []
-
-    for idx, item in enumerate(metadata):
-
-        text = item.get("text", "").lower()
-
-        matches = sum(
-            1
-            for word in question_words
-            if word in text
-        )
-
-        if matches > 0:
-
-            result = item.copy()
-
-            result["score"] = float(matches)
-            result["keyword_matches"] = matches
-            result["_index"] = idx
-
-            keyword_results.append(result)
-
-    # Best keyword matches first
-    keyword_results.sort(
-        key=lambda x: x["keyword_matches"],
-        reverse=True
-    )
-
-    # -----------------------------------------------------
-    # USE KEYWORD RESULTS WHEN AVAILABLE
-    # -----------------------------------------------------
-
-    if keyword_results:
-
-        return keyword_results[:top_k]
-
-    # -----------------------------------------------------
-    # FAISS SEMANTIC SEARCH FALLBACK
+    # SEMANTIC SEARCH — PRIMARY
     # -----------------------------------------------------
 
     query_embedding = embedding_model.encode(
@@ -237,29 +246,137 @@ def retrieve_context(question, subject, top_k=TOP_K):
         dtype="float32"
     )
 
-    scores, indices = index.search(
-        query_embedding,
-        top_k
+    semantic_k = min(
+        max(top_k * 4, 12),
+        index.ntotal
     )
 
-    results = []
+    semantic_scores, semantic_indices = index.search(
+        query_embedding,
+        semantic_k
+    )
 
-    for score, idx in zip(
-        scores[0],
-        indices[0]
+    candidates = {}
+
+    for rank, (score, idx) in enumerate(
+        zip(semantic_scores[0], semantic_indices[0]),
+        start=1
     ):
-
         if idx == -1:
             continue
 
+        idx = int(idx)
+
+        candidates[idx] = {
+            "semantic_score": float(score),
+            "semantic_rank": rank,
+            "keyword_score": 0,
+            "keyword_rank": None,
+        }
+
+    # -----------------------------------------------------
+    # KEYWORD SEARCH — SECONDARY
+    # -----------------------------------------------------
+
+    keyword_candidates = []
+
+    for idx, item in enumerate(metadata):
+        text = item.get("text", "")
+        score = _keyword_score(query_words, text)
+
+        if score > 0:
+            keyword_candidates.append((score, idx))
+
+    keyword_candidates.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    keyword_k = min(
+        max(top_k * 4, 12),
+        len(keyword_candidates)
+    )
+
+    for rank, (score, idx) in enumerate(
+        keyword_candidates[:keyword_k],
+        start=1
+    ):
+        if idx not in candidates:
+            candidates[idx] = {
+                "semantic_score": 0.0,
+                "semantic_rank": None,
+                "keyword_score": 0,
+                "keyword_rank": None,
+            }
+
+        candidates[idx]["keyword_score"] = float(score)
+        candidates[idx]["keyword_rank"] = rank
+
+    if not candidates:
+        return []
+
+    # -----------------------------------------------------
+    # NORMALIZE KEYWORD SCORE
+    # -----------------------------------------------------
+
+    max_keyword = max(
+        (item["keyword_score"] for item in candidates.values()),
+        default=1.0
+    )
+
+    # -----------------------------------------------------
+    # HYBRID RERANKING
+    # -----------------------------------------------------
+
+    ranked_results = []
+
+    for idx, signals in candidates.items():
+        semantic_score = signals["semantic_score"]
+        keyword_normalized = (
+            signals["keyword_score"] / max_keyword
+            if max_keyword > 0
+            else 0.0
+        )
+
+        # Semantic meaning is deliberately dominant.
+        hybrid_score = (
+            0.85 * semantic_score
+            + 0.15 * keyword_normalized
+        )
+
         result = metadata[idx].copy()
 
-        result["score"] = float(score)
+        result["score"] = float(hybrid_score)
+        result["semantic_score"] = float(semantic_score)
+        result["keyword_score"] = float(keyword_normalized)
         result["_index"] = int(idx)
 
-        results.append(result)
+        ranked_results.append(result)
 
-    return results
+    ranked_results.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    # -----------------------------------------------------
+    # RELEVANCE GATE
+    # -----------------------------------------------------
+    # Because FAISS will always return nearest neighbors, we need a
+    # minimum semantic confidence so unrelated questions don't reach Groq.
+
+    best_semantic = ranked_results[0]["semantic_score"]
+    best_keyword = ranked_results[0]["keyword_score"]
+
+    MIN_SEMANTIC_SCORE = 0.25
+    STRONG_KEYWORD_SCORE = 0.50
+
+    if (
+        best_semantic < MIN_SEMANTIC_SCORE
+        and best_keyword < STRONG_KEYWORD_SCORE
+    ):
+        return []
+
+    return ranked_results[:top_k]
 
 
 # =========================================================
