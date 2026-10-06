@@ -1,4 +1,4 @@
-```python
+
 import json
 from pathlib import Path
 
@@ -623,4 +623,4 @@ if ask_button:
                 st.error(
                     f"Something went wrong: {str(e)}"
                 )
-```
+
