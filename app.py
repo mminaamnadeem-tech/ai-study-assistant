@@ -1,5 +1,7 @@
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 import time
 
@@ -34,6 +36,13 @@ SUBJECT_KEYS = {
     "Chemistry": "chem",
     "Biology": "bio",
     "Computer": "computer",
+}
+
+SUBJECT_LABELS = {
+    "phy": "Physics",
+    "chem": "Chemistry",
+    "bio": "Biology",
+    "computer": "Computer",
 }
 
 SUBJECT_META = {
@@ -76,9 +85,34 @@ SUBJECT_META = {
 }
 
 GROQ_MODEL = "openai/gpt-oss-120b"
-TOP_K = 5
+TOP_K = 6
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+# Small + fast model used ONLY to understand/rewrite the student's question.
+# If it is unavailable the app silently falls back to rule-based rewriting.
+QUERY_REWRITE_MODEL = "llama-3.1-8b-instant"
+
+# Optional cross-encoder reranker (downloaded automatically on first run).
+# If it cannot be loaded the app silently falls back to hybrid ranking.
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_POOL = 30
+
+MAX_CONTEXT_CHARS = 14000
+
+REFUSAL_PHRASE = "couldn't find this information"
+
+STOP_WORDS = {
+    "what", "what's", "whats", "is", "are", "was", "were", "the", "a", "an",
+    "of", "to", "in", "on", "for", "from", "how", "why", "when", "where",
+    "which", "who", "whom", "does", "do", "did", "can", "could", "would",
+    "should", "explain", "define", "definition", "describe", "state", "tell",
+    "me", "about", "with", "and", "or", "please", "give", "meaning", "mean",
+    "means", "write", "short", "note", "notes", "brief", "briefly", "detail",
+    "details", "detailed", "understand", "know", "you", "your", "i", "my",
+    "it", "its", "this", "that", "these", "those", "be", "been", "by", "as",
+    "at", "any", "some", "also", "between", "difference", "name", "list",
+}
 
 
 # =========================================================
@@ -103,6 +137,23 @@ def load_embedding_model():
 
 
 embedding_model = load_embedding_model()
+
+
+# =========================================================
+# OPTIONAL RERANKER (cross-encoder)
+# =========================================================
+
+@st.cache_resource
+def load_reranker():
+    try:
+        from sentence_transformers import CrossEncoder
+
+        return CrossEncoder(RERANK_MODEL, max_length=512)
+    except Exception:
+        return None
+
+
+reranker = load_reranker()
 
 
 # =========================================================
@@ -171,31 +222,185 @@ def get_page_number(item):
 
 
 # =========================================================
-# RETRIEVAL
+# TEXT HELPERS
 # =========================================================
 
 def _normalize_words(text):
-    """Return normalized alphanumeric tokens for lightweight lexical search."""
+    """Return normalized alphanumeric tokens."""
     return re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
 
 
-def _keyword_score(query_words, text):
-    """Score lexical overlap, with a small phrase bonus."""
-    text_words = set(_normalize_words(text))
+def _stem(word):
+    """Very light plural stemming (forces -> force, laws -> law)."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
 
-    if not query_words or not text_words:
-        return 0
+    if (
+        len(word) > 3
+        and word.endswith("s")
+        and not word.endswith("ss")
+        and not word.endswith("us")
+        and not word.endswith("is")
+    ):
+        return word[:-1]
 
-    matches = sum(1 for word in query_words if word in text_words)
-
-    # Phrase bonus rewards direct multi-word matches without making
-    # exact wording mandatory.
-    phrase = " ".join(query_words)
-    phrase_bonus = 2 if phrase and phrase in text.lower() else 0
-
-    return matches + phrase_bonus
+    return word
 
 
+def _tokenize(text):
+    """Tokens for lexical search: lowercase, stop words removed, stemmed."""
+    return [
+        _stem(w)
+        for w in _normalize_words(text)
+        if w not in STOP_WORDS and len(w) >= 2
+    ]
+
+
+def _concept_words(question):
+    """Important words of a question (stop words removed)."""
+    return [
+        w
+        for w in _normalize_words(question)
+        if len(w) >= 3 and w not in STOP_WORDS
+    ]
+
+
+# =========================================================
+# BM25 LEXICAL INDEX (built once per subject)
+# =========================================================
+
+@st.cache_resource
+def load_bm25(subject):
+
+    _, metadata = load_subject_index(subject)
+
+    docs = [_tokenize(item.get("text", "") or "") for item in metadata]
+
+    doc_freq = Counter()
+    for doc in docs:
+        doc_freq.update(set(doc))
+
+    total_len = sum(len(doc) for doc in docs)
+    avg_len = (total_len / len(docs)) if docs and total_len else 1.0
+
+    return {
+        "tfs": [Counter(doc) for doc in docs],
+        "lengths": [len(doc) for doc in docs],
+        "doc_freq": doc_freq,
+        "avg_len": avg_len,
+        "n_docs": len(docs),
+    }
+
+
+def bm25_scores(bm25, query_terms, k1=1.5, b=0.75):
+    """Return {doc_index: bm25_score} for every doc that matches a term."""
+
+    scores = {}
+    n_docs = bm25["n_docs"]
+
+    for term in query_terms:
+
+        df = bm25["doc_freq"].get(term, 0)
+
+        if df == 0:
+            continue
+
+        idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+
+        for idx, tf_counter in enumerate(bm25["tfs"]):
+
+            tf = tf_counter.get(term, 0)
+
+            if tf == 0:
+                continue
+
+            length = bm25["lengths"][idx]
+
+            denom = tf + k1 * (1 - b + b * length / bm25["avg_len"])
+
+            scores[idx] = scores.get(idx, 0.0) + idf * (tf * (k1 + 1)) / denom
+
+    return scores
+
+
+# =========================================================
+# QUERY UNDERSTANDING
+# Turns ANY phrasing into several meaning-based search queries
+# =========================================================
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def understand_query(question, subject_label):
+    """
+    Returns a dict:
+      standalone_query      - short, clean search query
+      keywords              - important terms + synonyms / related terms
+      hypothetical_passage  - short textbook-style answer (HyDE)
+
+    Uses a small LLM when available, and always has a rule-based fallback,
+    so retrieval never depends on the student's exact wording.
+    """
+
+    concept_words = _concept_words(question)
+    concept_query = " ".join(concept_words).strip()
+
+    result = {
+        "standalone_query": concept_query or question,
+        "keywords": concept_words,
+        "hypothetical_passage": "",
+    }
+
+    prompt = f"""You are a search-query optimizer for a Class 11 {subject_label} textbook retrieval system.
+
+Student question: "{question}"
+
+Return ONLY a JSON object (no markdown, no explanation) with exactly these keys:
+- "standalone_query": a short search query (2-8 words) capturing the core concept asked about.
+- "keywords": a list of 4-10 important textbook terms: the main concept, its synonyms, closely related terms, and formula/law names a textbook would use.
+- "hypothetical_passage": 2-3 sentences written in textbook style that would answer the question.
+"""
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=QUERY_REWRITE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=400,
+        )
+
+        raw = (response.choices[0].message.content or "").strip()
+
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+
+        if match:
+            data = json.loads(match.group(0))
+
+            standalone = str(data.get("standalone_query", "")).strip()
+            keywords = data.get("keywords", [])
+            passage = str(data.get("hypothetical_passage", "")).strip()
+
+            if standalone:
+                result["standalone_query"] = standalone
+
+            if isinstance(keywords, list):
+                clean_keywords = []
+                for kw in keywords:
+                    clean_keywords.extend(_normalize_words(str(kw)))
+                result["keywords"] = list(
+                    dict.fromkeys(concept_words + clean_keywords)
+                )
+
+            if passage:
+                result["hypothetical_passage"] = passage
+
+    except Exception:
+        pass
+
+    return result
+
+
+# =========================================================
+# RETRIEVAL
+# =========================================================
 
 def retrieve_context(
     question,
@@ -203,18 +408,19 @@ def retrieve_context(
     top_k=TOP_K
 ):
     """
-    Advanced multi-query semantic hybrid retrieval.
+    Advanced meaning-based hybrid retrieval.
 
-    Important design:
-    - The original natural-language question is embedded.
-    - A condensed concept query is embedded.
-    - A definition/explanation query is embedded.
-    - Candidates are merged by their ACTUAL semantic similarity scores,
-      not only by rank. This prevents a strong "momentum" match from being
-      pushed down just because it was not highly ranked for the longer
-      wording "what is momentum?".
-    - Keywords are only a supporting signal.
-    - Exact wording is never required.
+    Pipeline:
+    1. Query understanding  -> several rewrites of the question
+       (original, concept-only, definition style, LLM standalone query,
+       keyword query, hypothetical textbook passage).
+    2. Semantic search (FAISS) for ALL rewrites. Each chunk is scored by
+       its best AND average similarity, so a strong match for the bare
+       concept ("momentum") is never lost because the longer wording
+       ("what is momentum?") ranked differently.
+    3. BM25 lexical search using the concept + synonym keywords.
+    4. Reciprocal Rank Fusion of semantic and lexical rankings.
+    5. Optional cross-encoder reranking of the best candidates.
     """
 
     index, metadata = load_subject_index(subject)
@@ -222,67 +428,71 @@ def retrieve_context(
     if index.ntotal == 0 or not metadata:
         return []
 
+    subject_label = SUBJECT_LABELS.get(subject, subject)
+
     # -----------------------------------------------------
-    # Query normalization
+    # 1. Query understanding
     # -----------------------------------------------------
 
-    stop_words = {
-        "what", "what's", "is", "are", "the", "a", "an",
-        "of", "to", "in", "on", "for", "from", "how", "why",
-        "when", "where", "which", "who", "does", "do", "did",
-        "can", "could", "would", "should", "explain", "define",
-        "definition", "describe", "state", "tell", "me", "about",
-        "with", "and", "or", "please", "give", "meaning"
-    }
+    understood = understand_query(question, subject_label)
 
-    raw_words = _normalize_words(question)
+    concept_words = _concept_words(question)
+    concept_query = " ".join(concept_words).strip()
 
-    query_words = [
-        word
-        for word in raw_words
-        if len(word) >= 3 and word not in stop_words
-    ]
+    standalone_query = understood.get("standalone_query") or concept_query or question
+    keywords = understood.get("keywords") or concept_words
+    hypothetical = understood.get("hypothetical_passage", "")
 
-    concept_query = " ".join(query_words).strip()
+    query_texts = [question]
+
+    def add_query(text):
+        text = (text or "").strip()
+        if text and text not in query_texts:
+            query_texts.append(text)
+
+    add_query(concept_query)
+    add_query(standalone_query)
 
     if concept_query:
-        definition_query = (
-            f"definition explanation concept of {concept_query}"
-        )
-    else:
-        definition_query = question
+        add_query(f"definition explanation concept of {concept_query}")
+
+    if keywords:
+        add_query(" ".join(keywords[:8]))
+
+    add_query(hypothetical)
 
     # -----------------------------------------------------
-    # Semantic search helper
+    # 2. Semantic search over all rewrites
     # -----------------------------------------------------
 
     candidate_k = min(
-        max(top_k * 10, 50),
+        max(top_k * 10, 60),
         index.ntotal
     )
 
-    def semantic_search(query_text):
-        embedding = embedding_model.encode(
-            [query_text],
-            normalize_embeddings=True
-        )
+    embeddings = embedding_model.encode(
+        query_texts,
+        normalize_embeddings=True
+    )
 
-        embedding = np.asarray(
-            embedding,
-            dtype="float32"
-        )
+    embeddings = np.asarray(
+        embeddings,
+        dtype="float32"
+    )
 
-        scores, indices = index.search(
-            embedding,
-            candidate_k
-        )
+    all_scores, all_indices = index.search(
+        embeddings,
+        candidate_k
+    )
+
+    score_maps = []
+
+    for row_scores, row_indices in zip(all_scores, all_indices):
 
         score_map = {}
 
-        for score, idx in zip(
-            scores[0],
-            indices[0]
-        ):
+        for score, idx in zip(row_scores, row_indices):
+
             if idx == -1:
                 continue
 
@@ -293,163 +503,264 @@ def retrieve_context(
 
             score_map[idx] = float(score)
 
-        return score_map
+        if score_map:
+            score_maps.append(score_map)
+
+    if not score_maps:
+        return []
+
+    floors = [min(m.values()) for m in score_maps]
+
+    semantic_candidates = set()
+    for m in score_maps:
+        semantic_candidates.update(m)
+
+    semantic_final = {}
+    semantic_best = {}
+
+    for idx in semantic_candidates:
+
+        values = []
+        present = []
+
+        for m, floor in zip(score_maps, floors):
+            if idx in m:
+                values.append(m[idx])
+                present.append(m[idx])
+            else:
+                values.append(floor)
+
+        best = max(present) if present else 0.0
+        mean = sum(values) / len(values)
+
+        semantic_best[idx] = best
+        semantic_final[idx] = 0.5 * best + 0.5 * mean
 
     # -----------------------------------------------------
-    # Run 3 semantic queries
+    # 3. BM25 lexical search
     # -----------------------------------------------------
 
-    full_scores = semantic_search(question)
+    lexical_terms = []
 
-    concept_scores = semantic_search(
-        concept_query if concept_query else question
+    for term in list(concept_words) + list(keywords):
+        for token in _tokenize(term):
+            if token not in lexical_terms:
+                lexical_terms.append(token)
+
+    bm25 = load_bm25(subject)
+    lexical_raw = bm25_scores(bm25, lexical_terms)
+
+    max_lexical = max(lexical_raw.values(), default=0.0)
+
+    lexical_norm = {
+        idx: (score / max_lexical if max_lexical > 0 else 0.0)
+        for idx, score in lexical_raw.items()
+    }
+
+    # -----------------------------------------------------
+    # 4. Reciprocal Rank Fusion
+    # -----------------------------------------------------
+
+    semantic_ranking = sorted(
+        semantic_final,
+        key=semantic_final.get,
+        reverse=True
     )
 
-    definition_scores = semantic_search(
-        definition_query
-    )
+    lexical_ranking = sorted(
+        lexical_raw,
+        key=lexical_raw.get,
+        reverse=True
+    )[:candidate_k]
+
+    RRF_K = 60
+
+    fused = {}
+
+    for rank, idx in enumerate(semantic_ranking):
+        fused[idx] = fused.get(idx, 0.0) + 1.0 / (RRF_K + rank + 1)
+
+    for rank, idx in enumerate(lexical_ranking):
+        fused[idx] = fused.get(idx, 0.0) + 0.7 / (RRF_K + rank + 1)
+
+    if not fused:
+        return []
 
     # -----------------------------------------------------
-    # Lexical evidence
+    # Relevance gate (very forgiving - the LLM makes the final call)
     # -----------------------------------------------------
 
-    lexical_scores = {}
+    MIN_SEMANTIC_SCORE = 0.15
 
-    for idx, item in enumerate(metadata):
-        text = item.get("text", "")
+    best_semantic = max(semantic_best.values(), default=0.0)
+    best_lexical = max(lexical_norm.values(), default=0.0)
+
+    if best_semantic < MIN_SEMANTIC_SCORE and best_lexical <= 0.0:
+        return []
+
+    pool_indices = sorted(
+        fused,
+        key=fused.get,
+        reverse=True
+    )[:max(RERANK_POOL, top_k)]
+
+    # -----------------------------------------------------
+    # 5. Optional cross-encoder reranking
+    # -----------------------------------------------------
+
+    rerank_scores = {}
+
+    if reranker is not None:
+
+        try:
+            rerank_query = standalone_query or question
+
+            pairs = [
+                (rerank_query, metadata[idx].get("text", "") or "")
+                for idx in pool_indices
+            ]
+
+            ce_scores = reranker.predict(pairs)
+
+            for idx, ce in zip(pool_indices, ce_scores):
+                rerank_scores[idx] = float(ce)
+
+        except Exception:
+            rerank_scores = {}
+
+    if rerank_scores:
+
+        ce_ranking = sorted(
+            rerank_scores,
+            key=rerank_scores.get,
+            reverse=True
+        )
+
+        hybrid_ranking = pool_indices
+
+        final_fusion = {}
+
+        for rank, idx in enumerate(ce_ranking):
+            final_fusion[idx] = (
+                final_fusion.get(idx, 0.0)
+                + 1.0 / (RRF_K + rank + 1)
+            )
+
+        for rank, idx in enumerate(hybrid_ranking):
+            final_fusion[idx] = (
+                final_fusion.get(idx, 0.0)
+                + 0.6 / (RRF_K + rank + 1)
+            )
+
+        final_order = sorted(
+            final_fusion,
+            key=final_fusion.get,
+            reverse=True
+        )
+
+    else:
+        final_order = pool_indices
+
+    # -----------------------------------------------------
+    # Build result objects
+    # -----------------------------------------------------
+
+    results = []
+
+    for idx in final_order[:top_k]:
+
+        result = metadata[idx].copy()
+
+        result["score"] = float(fused.get(idx, 0.0))
+        result["semantic_score"] = float(semantic_best.get(idx, 0.0))
+        result["keyword_score"] = float(lexical_norm.get(idx, 0.0))
+
+        if idx in rerank_scores:
+            result["rerank_score"] = float(rerank_scores[idx])
+
+        result["_index"] = int(idx)
+
+        results.append(result)
+
+    return results
+
+
+# =========================================================
+# CONTEXT BUILDER (adds neighbouring chunks for completeness)
+# =========================================================
+
+def _page_as_int(page):
+    try:
+        return int(page)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_context(results, subject, neighbor_count=3):
+    """
+    Build textbook context from retrieved chunks.
+    The top chunks also pull in their immediate neighbours, because a
+    definition is often split across two consecutive chunks.
+    """
+
+    _, metadata = load_subject_index(subject)
+
+    selected = {}
+
+    for result in results:
+        idx = result.get("_index")
+        if idx is not None:
+            selected[idx] = metadata[idx]
+
+    for result in results[:neighbor_count]:
+
+        idx = result.get("_index")
+
+        if idx is None:
+            continue
+
+        base_page = _page_as_int(get_page_number(metadata[idx]))
+
+        for neighbor in (idx - 1, idx + 1):
+
+            if neighbor < 0 or neighbor >= len(metadata):
+                continue
+
+            if neighbor in selected:
+                continue
+
+            neighbor_page = _page_as_int(get_page_number(metadata[neighbor]))
+
+            if (
+                base_page is not None
+                and neighbor_page is not None
+                and abs(neighbor_page - base_page) > 1
+            ):
+                continue
+
+            selected[neighbor] = metadata[neighbor]
+
+    context_parts = []
+    total_chars = 0
+
+    for idx in sorted(selected):
+
+        item = selected[idx]
+
+        text = (item.get("text", "") or "").strip()
 
         if not text:
             continue
 
-        text_lower = text.lower()
-        text_words = set(
-            _normalize_words(text)
-        )
+        part = f"SOURCE PAGE: {get_page_number(item)}\n{text}"
 
-        matches = 0
+        if total_chars + len(part) > MAX_CONTEXT_CHARS:
+            break
 
-        for word in query_words:
-            if word in text_words:
-                matches += 1
-                continue
+        context_parts.append(part)
+        total_chars += len(part)
 
-            if len(word) > 3:
-                singular = None
-
-                if word.endswith("ies"):
-                    singular = word[:-3] + "y"
-                elif word.endswith("es"):
-                    singular = word[:-2]
-                elif word.endswith("s"):
-                    singular = word[:-1]
-
-                if singular and singular in text_words:
-                    matches += 1
-
-        if matches:
-            lexical_scores[idx] = matches
-
-    max_keyword = max(
-        lexical_scores.values(),
-        default=1
-    )
-
-    # -----------------------------------------------------
-    # Merge every semantic candidate
-    # -----------------------------------------------------
-
-    candidates = set(full_scores)
-    candidates.update(concept_scores)
-    candidates.update(definition_scores)
-    candidates.update(lexical_scores)
-
-    if not candidates:
-        return []
-
-    ranked_results = []
-
-    for idx in candidates:
-        full = full_scores.get(idx, 0.0)
-        concept = concept_scores.get(idx, 0.0)
-        definition = definition_scores.get(idx, 0.0)
-
-        keyword = (
-            lexical_scores.get(idx, 0) / max_keyword
-            if max_keyword > 0
-            else 0.0
-        )
-
-        # -------------------------------------------------
-        # KEY FIX:
-        # Use actual similarity values rather than RRF-only rank.
-        # A strong concept match can therefore win even when the
-        # longer question wording ranks differently.
-        # -------------------------------------------------
-
-        semantic_hybrid = (
-            0.50 * full
-            + 0.30 * concept
-            + 0.20 * definition
-        )
-
-        # Small lexical boost; keywords NEVER dominate semantics.
-        final_score = (
-            0.90 * semantic_hybrid
-            + 0.10 * keyword
-        )
-
-        result = metadata[idx].copy()
-
-        result["score"] = float(final_score)
-        result["semantic_score"] = float(full)
-        result["concept_semantic_score"] = float(concept)
-        result["definition_semantic_score"] = float(definition)
-        result["keyword_score"] = float(keyword)
-        result["_index"] = int(idx)
-
-        ranked_results.append(result)
-
-    ranked_results.sort(
-        key=lambda item: item["score"],
-        reverse=True
-    )
-
-    # -----------------------------------------------------
-    # Relevance gate
-    # -----------------------------------------------------
-    # Because the three-query approach is much stronger than the old
-    # single-query gate, use the BEST semantic evidence from any query.
-
-    best_full = max(
-        (item["semantic_score"] for item in ranked_results),
-        default=0.0
-    )
-
-    best_concept = max(
-        (item["concept_semantic_score"] for item in ranked_results),
-        default=0.0
-    )
-
-    best_definition = max(
-        (item["definition_semantic_score"] for item in ranked_results),
-        default=0.0
-    )
-
-    best_keyword = max(
-        (item["keyword_score"] for item in ranked_results),
-        default=0.0
-    )
-
-    MIN_SEMANTIC_SCORE = 0.20
-
-    if (
-        max(best_full, best_concept, best_definition)
-        < MIN_SEMANTIC_SCORE
-        and best_keyword <= 0.0
-    ):
-        return []
-
-    return ranked_results[:top_k]
+    return "\n\n".join(context_parts)
 
 
 # =========================================================
@@ -459,13 +770,16 @@ def retrieve_context(
 def generate_answer(
     question,
     subject,
-    answer_mode
+    answer_mode,
+    expanded=False
 ):
+
+    top_k = TOP_K * 2 if expanded else TOP_K
 
     results = retrieve_context(
         question,
         subject,
-        TOP_K
+        top_k
     )
 
     if not results:
@@ -478,24 +792,13 @@ def generate_answer(
     # BUILD TEXTBOOK CONTEXT
     # -----------------------------------------------------
 
-    context_parts = []
-
-    for result in results:
-
-        page = get_page_number(result)
-
-        text = result.get(
-            "text",
-            ""
-        )
-
-        context_parts.append(
-            f"SOURCE PAGE: {page}\n{text}"
-        )
-
-    context = "\n\n".join(
-        context_parts
+    context = build_context(
+        results,
+        subject,
+        neighbor_count=6 if expanded else 3
     )
+
+    subject_label = SUBJECT_LABELS.get(subject, subject)
 
     # =====================================================
     # SYSTEM PROMPT
@@ -517,17 +820,21 @@ examples, explanations, or conclusions.
 
 5. Use ONLY the selected subject's textbook.
 
-6. If the supplied context does not contain
-enough information to answer the question, say:
+6. The student may phrase the question differently from the
+textbook (for example "momentum", "what is momentum", "define
+momentum" or "momentum kya hota hai" all mean the same thing).
+Match by MEANING, not by exact wording. If the context contains
+relevant, partial or related information about the topic, answer
+using whatever the context supports.
+
+7. ONLY if the supplied context contains nothing relevant to the
+topic at all, say exactly:
 
 "I couldn't find this information in the selected textbook."
 
-7. Stay faithful to the textbook.
+8. Stay faithful to the textbook.
 
-8. Answer at a clear Class 11 student level.
-
-9. If the question is not supported by the context,
-do not guess.
+9. Answer at a clear Class 11 student level.
 
 10. Use simple and clean formatting.
 
@@ -543,6 +850,10 @@ Example: p = mv
 
 ### In Short:
 
+(The only exception is when you reply with the
+"I couldn't find this information in the selected textbook."
+sentence.)
+
 15. The "In Short" section must be detailed but concise.
 
 16. The "In Short" section should normally contain
@@ -553,7 +864,7 @@ definition, important formula(s), key concept(s),
 important law(s), and essential relationships
 covered in the answer.
 
-18. NEVER omit the "### In Short:" section.
+18. NEVER omit the "### In Short:" section when you answer.
 
 19. The "In Short" section must use ONLY information
 supported by the supplied textbook context.
@@ -652,7 +963,7 @@ Use ONLY information from the textbook context.
 
     user_prompt = f"""
 SELECTED SUBJECT:
-{subject}
+{subject_label}
 
 ANSWER MODE:
 {answer_mode}
@@ -670,24 +981,26 @@ FINAL REQUIREMENTS:
 
 1. Answer ONLY using the supplied textbook context.
 
-2. Use simple, clean and readable formatting.
+2. Match the question to the context by meaning, not by exact words.
 
-3. Do NOT use LaTeX.
+3. Use simple, clean and readable formatting.
 
-4. Write formulas in plain text.
+4. Do NOT use LaTeX.
 
-5. Your response MUST end with:
+5. Write formulas in plain text.
+
+6. Your response MUST end with:
 
 ### In Short:
 
-6. After "### In Short:", provide a detailed but
+7. After "### In Short:", provide a detailed but
 concise revision summary covering the important
 points of the answer.
 
-7. The In Short section should normally contain
+8. The In Short section should normally contain
 4-6 sentences or short bullet points.
 
-8. Do not use information outside the textbook context.
+9. Do not use information outside the textbook context.
 """
 
     # =====================================================
@@ -709,7 +1022,26 @@ points of the answer.
         temperature=0.1
     )
 
-    answer = response.choices[0].message.content.strip()
+    answer = (response.choices[0].message.content or "").strip()
+
+    # -----------------------------------------------------
+    # SAFETY NET:
+    # If the model refused even though chunks were retrieved,
+    # retry once with a wider search + more neighbouring context.
+    # -----------------------------------------------------
+
+    if (
+        not expanded
+        and answer
+        and REFUSAL_PHRASE in answer.lower()
+        and len(answer) < 300
+    ):
+        return generate_answer(
+            question,
+            subject,
+            answer_mode,
+            expanded=True
+        )
 
     return answer, results
 
