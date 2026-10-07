@@ -171,41 +171,76 @@ def get_page_number(item):
 
 
 # =========================================================
-# RETRIEVAL
+# RETRIEVAL HELPERS
 # =========================================================
 
 def _normalize_words(text):
-    """Return normalized alphanumeric tokens for lightweight lexical search."""
-    return re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
+    """Return normalized alphanumeric tokens."""
+    return re.findall(
+        r"\b[a-zA-Z0-9]+\b",
+        text.lower()
+    )
 
 
 def _keyword_score(query_words, text):
-    """Score lexical overlap, with a small phrase bonus."""
-    text_words = set(_normalize_words(text))
+    """Score lexical overlap with a small phrase bonus."""
+    text_words = set(
+        _normalize_words(text)
+    )
 
     if not query_words or not text_words:
         return 0
 
-    matches = sum(1 for word in query_words if word in text_words)
+    matches = sum(
+        1
+        for word in query_words
+        if word in text_words
+    )
 
-    # Phrase bonus rewards direct multi-word matches without making
-    # exact wording mandatory.
     phrase = " ".join(query_words)
-    phrase_bonus = 2 if phrase and phrase in text.lower() else 0
+
+    phrase_bonus = (
+        2
+        if phrase and phrase in text.lower()
+        else 0
+    )
 
     return matches + phrase_bonus
 
 
-def retrieve_context(question, subject, top_k=TOP_K):
+# =========================================================
+# ADVANCED HYBRID RAG RETRIEVAL
+# =========================================================
+
+def retrieve_context(
+    question,
+    subject,
+    top_k=TOP_K
+):
     """
-    Hybrid semantic + keyword RAG retrieval.
+    Advanced Hybrid RAG retrieval.
 
-    Semantic search is the PRIMARY signal, so paraphrased questions can
-    retrieve textbook passages even when the exact words are different.
-    Keyword overlap is a secondary signal used for re-ranking.
+    Retrieval signals:
 
-    Retrieval remains strictly subject-isolated because the FAISS index
-    is loaded only for the selected subject.
+    1. Full natural-language semantic search
+    2. Condensed concept semantic search
+    3. Lightweight lexical matching
+    4. Reciprocal Rank Fusion (RRF)
+
+    Semantic retrieval is the PRIMARY signal.
+    Keyword matching is only a supporting signal.
+
+    Exact wording is NOT required.
+
+    Examples:
+
+        What is momentum?
+        Define momentum
+        Explain momentum
+        What quantity represents motion?
+        Which quantity depends on mass and velocity?
+
+    can all retrieve semantically related textbook content.
     """
 
     index, metadata = load_subject_index(subject)
@@ -213,28 +248,76 @@ def retrieve_context(question, subject, top_k=TOP_K):
     if index.ntotal == 0 or not metadata:
         return []
 
-    # -----------------------------------------------------
-    # Normalize the query
-    # -----------------------------------------------------
 
-    raw_question_words = _normalize_words(question)
+    # =====================================================
+    # NORMALIZE QUERY
+    # =====================================================
 
     stop_words = {
-        "what", "is", "are", "the", "a", "an", "of", "to", "in",
-        "on", "for", "how", "why", "when", "where", "does", "do",
-        "explain", "define", "describe", "state", "tell", "me",
-        "about", "can", "you", "please", "with", "and", "or"
+        "what",
+        "what's",
+        "is",
+        "are",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "from",
+        "how",
+        "why",
+        "when",
+        "where",
+        "which",
+        "who",
+        "does",
+        "do",
+        "did",
+        "can",
+        "could",
+        "would",
+        "should",
+        "explain",
+        "define",
+        "definition",
+        "describe",
+        "state",
+        "tell",
+        "me",
+        "about",
+        "with",
+        "and",
+        "or",
+        "please",
+        "give",
     }
+
+    all_query_tokens = _normalize_words(
+        question
+    )
 
     query_words = [
         word
-        for word in raw_question_words
-        if len(word) >= 3 and word not in stop_words
+        for word in all_query_tokens
+        if len(word) >= 3
+        and word not in stop_words
     ]
 
-    # -----------------------------------------------------
-    # SEMANTIC SEARCH — PRIMARY
-    # -----------------------------------------------------
+    # Example:
+    # "What is momentum?"
+    # -> "momentum"
+    condensed_query = " ".join(
+        query_words
+    ).strip()
+
+
+    # =====================================================
+    # SEMANTIC SEARCH 1
+    # FULL NATURAL-LANGUAGE QUESTION
+    # =====================================================
 
     query_embedding = embedding_model.encode(
         [question],
@@ -246,137 +329,333 @@ def retrieve_context(question, subject, top_k=TOP_K):
         dtype="float32"
     )
 
+    # Wider candidate pool because current vectorstores
+    # are page-level indexes.
     semantic_k = min(
-        max(top_k * 4, 12),
+        max(top_k * 8, 40),
         index.ntotal
     )
 
-    semantic_scores, semantic_indices = index.search(
+    semantic_scores,
+    semantic_indices = index.search(
         query_embedding,
         semantic_k
     )
 
-    candidates = {}
+    semantic_rank = {}
+    semantic_score_map = {}
 
     for rank, (score, idx) in enumerate(
-        zip(semantic_scores[0], semantic_indices[0]),
+        zip(
+            semantic_scores[0],
+            semantic_indices[0]
+        ),
         start=1
     ):
+
         if idx == -1:
             continue
 
         idx = int(idx)
 
-        candidates[idx] = {
-            "semantic_score": float(score),
-            "semantic_rank": rank,
-            "keyword_score": 0,
-            "keyword_rank": None,
-        }
+        semantic_rank[idx] = rank
+        semantic_score_map[idx] = float(
+            score
+        )
 
-    # -----------------------------------------------------
-    # KEYWORD SEARCH — SECONDARY
-    # -----------------------------------------------------
 
-    keyword_candidates = []
+    # =====================================================
+    # SEMANTIC SEARCH 2
+    # CONDENSED CONCEPT QUERY
+    # =====================================================
+
+    condensed_rank = {}
+    condensed_score_map = {}
+
+    if (
+        condensed_query
+        and condensed_query.lower()
+        != question.lower()
+    ):
+
+        condensed_embedding = embedding_model.encode(
+            [condensed_query],
+            normalize_embeddings=True
+        )
+
+        condensed_embedding = np.asarray(
+            condensed_embedding,
+            dtype="float32"
+        )
+
+        condensed_scores,
+        condensed_indices = index.search(
+            condensed_embedding,
+            semantic_k
+        )
+
+        for rank, (score, idx) in enumerate(
+            zip(
+                condensed_scores[0],
+                condensed_indices[0]
+            ),
+            start=1
+        ):
+
+            if idx == -1:
+                continue
+
+            idx = int(idx)
+
+            condensed_rank[idx] = rank
+
+            condensed_score_map[idx] = float(
+                score
+            )
+
+
+    # =====================================================
+    # LEXICAL SEARCH
+    # SECONDARY SIGNAL ONLY
+    # =====================================================
+
+    lexical_scores = {}
 
     for idx, item in enumerate(metadata):
-        text = item.get("text", "")
-        score = _keyword_score(query_words, text)
 
-        if score > 0:
-            keyword_candidates.append((score, idx))
+        text = item.get(
+            "text",
+            ""
+        )
 
-    keyword_candidates.sort(
-        key=lambda x: x[0],
+        if not text:
+            continue
+
+        text_tokens = set(
+            _normalize_words(text)
+        )
+
+        matches = sum(
+            1
+            for word in query_words
+            if word in text_tokens
+        )
+
+        # -------------------------------------------------
+        # BASIC SINGULAR / PLURAL SUPPORT
+        # -------------------------------------------------
+
+        if matches == 0:
+
+            for word in query_words:
+
+                if len(word) <= 3:
+                    continue
+
+                singular = None
+
+                if word.endswith("ies"):
+                    singular = (
+                        word[:-3]
+                        + "y"
+                    )
+
+                elif word.endswith("es"):
+                    singular = word[:-2]
+
+                elif word.endswith("s"):
+                    singular = word[:-1]
+
+                if (
+                    singular
+                    and singular in text_tokens
+                ):
+                    matches += 1
+
+        if matches:
+            lexical_scores[idx] = matches
+
+
+    lexical_sorted = sorted(
+        lexical_scores.items(),
+        key=lambda item: item[1],
         reverse=True
     )
 
-    keyword_k = min(
-        max(top_k * 4, 12),
-        len(keyword_candidates)
+    lexical_rank = {
+        idx: rank
+        for rank, (idx, _) in enumerate(
+            lexical_sorted,
+            start=1
+        )
+    }
+
+
+    # =====================================================
+    # RECIPROCAL RANK FUSION
+    # =====================================================
+
+    # Semantic = strongest
+    # Condensed semantic = second strongest
+    # Keyword = supporting signal
+
+    RRF_K = 60
+
+    candidates = set(
+        semantic_rank
     )
 
-    for rank, (score, idx) in enumerate(
-        keyword_candidates[:keyword_k],
-        start=1
-    ):
-        if idx not in candidates:
-            candidates[idx] = {
-                "semantic_score": 0.0,
-                "semantic_rank": None,
-                "keyword_score": 0,
-                "keyword_rank": None,
-            }
+    candidates.update(
+        condensed_rank
+    )
 
-        candidates[idx]["keyword_score"] = float(score)
-        candidates[idx]["keyword_rank"] = rank
+    candidates.update(
+        lexical_rank
+    )
 
-    if not candidates:
+    fused_scores = {}
+
+    for idx in candidates:
+
+        score = 0.0
+
+        # Full question semantic ranking
+        if idx in semantic_rank:
+
+            score += (
+                0.60
+                /
+                (
+                    RRF_K
+                    + semantic_rank[idx]
+                )
+            )
+
+        # Condensed concept ranking
+        if idx in condensed_rank:
+
+            score += (
+                0.25
+                /
+                (
+                    RRF_K
+                    + condensed_rank[idx]
+                )
+            )
+
+        # Lexical ranking
+        if idx in lexical_rank:
+
+            score += (
+                0.15
+                /
+                (
+                    RRF_K
+                    + lexical_rank[idx]
+                )
+            )
+
+        fused_scores[idx] = score
+
+
+    # =====================================================
+    # FINAL RANKING
+    # =====================================================
+
+    ranked_indices = sorted(
+        fused_scores,
+        key=lambda idx: fused_scores[idx],
+        reverse=True
+    )
+
+    if not ranked_indices:
         return []
 
-    # -----------------------------------------------------
-    # NORMALIZE KEYWORD SCORE
-    # -----------------------------------------------------
 
-    max_keyword = max(
-        (item["keyword_score"] for item in candidates.values()),
-        default=1.0
-    )
+    # =====================================================
+    # BUILD FINAL RESULTS
+    # =====================================================
 
-    # -----------------------------------------------------
-    # HYBRID RERANKING
-    # -----------------------------------------------------
+    results = []
 
-    ranked_results = []
-
-    for idx, signals in candidates.items():
-        semantic_score = signals["semantic_score"]
-        keyword_normalized = (
-            signals["keyword_score"] / max_keyword
-            if max_keyword > 0
-            else 0.0
-        )
-
-        # Semantic meaning is deliberately dominant.
-        hybrid_score = (
-            0.85 * semantic_score
-            + 0.15 * keyword_normalized
-        )
+    for idx in ranked_indices[:top_k]:
 
         result = metadata[idx].copy()
 
-        result["score"] = float(hybrid_score)
-        result["semantic_score"] = float(semantic_score)
-        result["keyword_score"] = float(keyword_normalized)
-        result["_index"] = int(idx)
+        result["score"] = float(
+            fused_scores[idx]
+        )
 
-        ranked_results.append(result)
+        result["semantic_score"] = float(
+            semantic_score_map.get(
+                idx,
+                0.0
+            )
+        )
 
-    ranked_results.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
+        result["condensed_semantic_score"] = float(
+            condensed_score_map.get(
+                idx,
+                0.0
+            )
+        )
 
-    # -----------------------------------------------------
+        result["keyword_score"] = float(
+            lexical_scores.get(
+                idx,
+                0
+            )
+        )
+
+        result["_index"] = int(
+            idx
+        )
+
+        results.append(
+            result
+        )
+
+
+    # =====================================================
     # RELEVANCE GATE
-    # -----------------------------------------------------
-    # Because FAISS will always return nearest neighbors, we need a
-    # minimum semantic confidence so unrelated questions don't reach Groq.
+    # =====================================================
 
-    best_semantic = ranked_results[0]["semantic_score"]
-    best_keyword = ranked_results[0]["keyword_score"]
+    # Important:
+    #
+    # FAISS always returns nearest vectors.
+    # Therefore completely unrelated queries need a gate.
+    #
+    # This threshold is deliberately permissive so that
+    # paraphrases and natural-language questions are not
+    # rejected.
 
-    MIN_SEMANTIC_SCORE = 0.25
-    STRONG_KEYWORD_SCORE = 0.50
+    best = results[0]
+
+    best_semantic = best[
+        "semantic_score"
+    ]
+
+    best_condensed = best[
+        "condensed_semantic_score"
+    ]
+
+    best_keyword = best[
+        "keyword_score"
+    ]
+
+    MIN_SEMANTIC_SCORE = 0.20
+
+    # A result is accepted if either semantic route
+    # has meaningful relevance OR lexical evidence exists.
 
     if (
         best_semantic < MIN_SEMANTIC_SCORE
-        and best_keyword < STRONG_KEYWORD_SCORE
+        and best_condensed < MIN_SEMANTIC_SCORE
+        and best_keyword <= 0
     ):
         return []
 
-    return ranked_results[:top_k]
+    return results
 
 
 # =========================================================
@@ -401,15 +680,18 @@ def generate_answer(
             "I couldn't find this information in the selected textbook."
         ), []
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # BUILD TEXTBOOK CONTEXT
-    # -----------------------------------------------------
+    # =====================================================
 
     context_parts = []
 
     for result in results:
 
-        page = get_page_number(result)
+        page = get_page_number(
+            result
+        )
 
         text = result.get(
             "text",
@@ -423,6 +705,7 @@ def generate_answer(
     context = "\n\n".join(
         context_parts
     )
+
 
     # =====================================================
     # SYSTEM PROMPT
@@ -485,6 +768,7 @@ covered in the answer.
 19. The "In Short" section must use ONLY information
 supported by the supplied textbook context.
 """
+
 
     # =====================================================
     # ANSWER MODE
@@ -573,6 +857,7 @@ Use 4-6 sentences or short bullet points.
 Use ONLY information from the textbook context.
 """
 
+
     # =====================================================
     # USER PROMPT
     # =====================================================
@@ -616,6 +901,7 @@ points of the answer.
 
 8. Do not use information outside the textbook context.
 """
+
 
     # =====================================================
     # GROQ REQUEST
@@ -1067,7 +1353,10 @@ div[data-testid="stExpander"] {
 </style>
 """
 
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+st.markdown(
+    CUSTOM_CSS,
+    unsafe_allow_html=True
+)
 
 
 # =========================================================
@@ -1088,16 +1377,32 @@ st.markdown(
         <div class="hero-pill">
             <span>✨</span> AI-POWERED TEXTBOOK INTELLIGENCE · CLASS 11
         </div>
-        <h1 class="hero-title">AI Study Assistant</h1>
+
+        <h1 class="hero-title">
+            AI Study Assistant
+        </h1>
+
         <p class="hero-subtitle">
             Ask questions directly from your Class 11 textbooks. Get instant, verified,
             and zero-hallucination answers powered by high-speed Groq LPU inference.
         </p>
+
         <div class="feature-strip">
-            <div class="feature-badge">⚡ Instant Groq LPU Engine</div>
-            <div class="feature-badge">🔍 Hybrid Semantic + Keyword Search</div>
-            <div class="feature-badge">🛡️ Strict Textbook Verification</div>
-            <div class="feature-badge">📄 Page-Accurate Citations</div>
+            <div class="feature-badge">
+                ⚡ Instant Groq LPU Engine
+            </div>
+
+            <div class="feature-badge">
+                🔍 Hybrid Semantic + Keyword Search
+            </div>
+
+            <div class="feature-badge">
+                🛡️ Strict Textbook Verification
+            </div>
+
+            <div class="feature-badge">
+                📄 Page-Accurate Citations
+            </div>
         </div>
     </div>
     """,
@@ -1106,12 +1411,16 @@ st.markdown(
 
 
 # =========================================================
-# STEP 1 & STEP 2 — CLASS & SUBJECT (2-COLUMN GRID)
+# STEP 1 & STEP 2 — CLASS & SUBJECT
 # =========================================================
 
-col_step1, col_step2 = st.columns([1, 2], gap="medium")
+col_step1, col_step2 = st.columns(
+    [1, 2],
+    gap="medium"
+)
 
 with col_step1:
+
     st.markdown(
         """
         <div class="step-header-box">
@@ -1121,13 +1430,16 @@ with col_step1:
         """,
         unsafe_allow_html=True,
     )
+
     st.selectbox(
         "Select Class",
         ["Class 11"],
         label_visibility="collapsed",
     )
 
+
 with col_step2:
+
     st.markdown(
         """
         <div class="step-header-box">
@@ -1137,18 +1449,23 @@ with col_step2:
         """,
         unsafe_allow_html=True,
     )
+
     selected_subject_name = st.selectbox(
         "Select Subject",
         SUPPORTED_SUBJECTS,
-        format_func=lambda s: f"{SUBJECT_META.get(s, {}).get('icon', '📖')}  {s}",
+        format_func=lambda s: (
+            f"{SUBJECT_META.get(s, {}).get('icon', '📖')}  {s}"
+        ),
         label_visibility="collapsed",
     )
 
-    selected_subject = SUBJECT_KEYS[selected_subject_name]
+    selected_subject = SUBJECT_KEYS[
+        selected_subject_name
+    ]
 
 
 # =========================================================
-# STEP 3 — QUESTION INPUT & QUICK SUGGESTION CHIPS
+# STEP 3 — QUESTION INPUT
 # =========================================================
 
 st.markdown(
@@ -1161,31 +1478,56 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Suggested question chips for active subject
-active_meta = SUBJECT_META.get(selected_subject_name, {})
-prompts = active_meta.get("prompts", [])
+
+# Suggested question chips
+active_meta = SUBJECT_META.get(
+    selected_subject_name,
+    {}
+)
+
+prompts = active_meta.get(
+    "prompts",
+    []
+)
+
 
 st.markdown(
     f'<div class="chip-title">💡 Popular {selected_subject_name} Inquiries (Click to autofill):</div>',
     unsafe_allow_html=True,
 )
 
-chip_cols = st.columns(len(prompts))
-for idx, prompt_text in enumerate(prompts):
+
+chip_cols = st.columns(
+    len(prompts)
+)
+
+for idx, prompt_text in enumerate(
+    prompts
+):
+
     with chip_cols[idx]:
+
         if st.button(
             f"📌 {prompt_text[:28]}...",
             key=f"chip_{selected_subject_name}_{idx}",
             help=prompt_text,
             use_container_width=True,
         ):
-            st.session_state.question_input_text = prompt_text
+
+            st.session_state.question_input_text = (
+                prompt_text
+            )
+
             st.rerun()
+
 
 question = st.text_area(
     "Enter your question:",
     value=st.session_state.question_input_text,
-    placeholder=f"Example: {prompts[0] if prompts else 'Explain photosynthesis'}",
+    placeholder=(
+        f"Example: "
+        f"{prompts[0] if prompts else 'Explain photosynthesis'}"
+    ),
     height=120,
     label_visibility="collapsed",
 )
@@ -1205,6 +1547,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 answer_mode = st.radio(
     "Choose answer format:",
     [
@@ -1217,7 +1560,10 @@ answer_mode = st.radio(
         "Explanation": "💡 Explanation (Step-by-Step)",
         "Summary": "⚡ Summary (High-Yield Revision)",
         "Quiz": "🎯 Quiz (Practice & MCQs)",
-    }.get(mode, mode),
+    }.get(
+        mode,
+        mode
+    ),
     label_visibility="collapsed",
 )
 
@@ -1226,7 +1572,11 @@ answer_mode = st.radio(
 # ASK BUTTON
 # =========================================================
 
-st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='height: 12px;'></div>",
+    unsafe_allow_html=True
+)
+
 
 ask_button = st.button(
     "🤖 Ask AI Study Assistant",
@@ -1254,6 +1604,7 @@ if ask_button:
         ):
 
             try:
+
                 start_time = time.time()
 
                 answer, sources = generate_answer(
@@ -1262,65 +1613,109 @@ if ask_button:
                     answer_mode
                 )
 
-                elapsed_time = round(time.time() - start_time, 2)
+                elapsed_time = round(
+                    time.time() - start_time,
+                    2
+                )
 
-                # Split answer and 'In Short' summary if present
+
+                # =================================================
+                # SPLIT MAIN ANSWER + IN SHORT
+                # =================================================
+
                 main_answer = answer
                 in_short_summary = None
 
                 if "### In Short:" in answer:
-                    parts = answer.split("### In Short:")
+
+                    parts = answer.split(
+                        "### In Short:"
+                    )
+
                     main_answer = parts[0].strip()
                     in_short_summary = parts[1].strip()
 
-                # Render Answer Container
+
+                # =================================================
+                # RENDER ANSWER CONTAINER
+                # =================================================
+
                 st.markdown(
                     f"""
                     <div class="answer-container">
+
                         <div class="answer-top-bar">
+
                             <div class="answer-badge-group">
+
                                 <span class="answer-badge badge-subject">
-                                    {active_meta.get('icon', '📚')} {selected_subject_name}
+                                    {active_meta.get('icon', '📚')}
+                                    {selected_subject_name}
                                 </span>
+
                                 <span class="answer-badge badge-mode">
                                     {answer_mode} Mode
                                 </span>
+
                                 <span class="answer-badge badge-source">
                                     ⚡ {elapsed_time}s
                                 </span>
+
                             </div>
+
                             <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 500;">
                                 Model: {GROQ_MODEL}
                             </span>
+
                         </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
-                # Main Answer Markdown
-                st.markdown(main_answer)
 
-                # High-Yield Revision Callout
+                # =================================================
+                # MAIN ANSWER
+                # =================================================
+
+                st.markdown(
+                    main_answer
+                )
+
+
+                # =================================================
+                # IN SHORT
+                # =================================================
+
                 if in_short_summary:
+
                     st.markdown(
                         f"""
                         <div class="in-short-banner">
+
                             <div class="in-short-title">
-                                <span>⚡</span> In Short: High-Yield Revision Summary
+                                <span>⚡</span>
+                                In Short: High-Yield Revision Summary
                             </div>
+
                             <div style="color: #e0e7ff; font-size: 0.95rem; line-height: 1.6;">
                                 {in_short_summary}
                             </div>
+
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
 
-                st.markdown("</div>", unsafe_allow_html=True)
 
-                # -------------------------------------------------
+                st.markdown(
+                    "</div>",
+                    unsafe_allow_html=True
+                )
+
+
+                # =================================================
                 # TEXTBOOK SOURCES
-                # -------------------------------------------------
+                # =================================================
 
                 if sources:
 
@@ -1335,7 +1730,11 @@ if ask_button:
                                 source
                             )
 
-                            snippet = source.get("text", "").strip()
+                            snippet = source.get(
+                                "text",
+                                ""
+                            ).strip()
+
                             clean_snippet = (
                                 snippet[:300] + "..."
                                 if len(snippet) > 300
@@ -1345,14 +1744,20 @@ if ask_button:
                             st.markdown(
                                 f"""
                                 <div class="source-citation-card">
-                                    <span class="source-page-tag">📄 PAGE {page}</span>
+
+                                    <span class="source-page-tag">
+                                        📄 PAGE {page}
+                                    </span>
+
                                     <div class="source-text-snippet">
                                         "{clean_snippet}"
                                     </div>
+
                                 </div>
                                 """,
                                 unsafe_allow_html=True,
                             )
+
 
             except Exception as e:
 
