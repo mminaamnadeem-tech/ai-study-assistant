@@ -175,7 +175,7 @@ def get_page_number(item):
 # =========================================================
 
 def _normalize_words(text):
-    """Return normalized alphanumeric tokens."""
+    """Return normalized alphanumeric tokens for lexical search."""
     return re.findall(
         r"\b[a-zA-Z0-9]+\b",
         text.lower()
@@ -183,7 +183,7 @@ def _normalize_words(text):
 
 
 def _keyword_score(query_words, text):
-    """Score lexical overlap with a small phrase bonus."""
+    """Score lexical overlap, with a small phrase bonus."""
     text_words = set(
         _normalize_words(text)
     )
@@ -218,29 +218,27 @@ def retrieve_context(
     top_k=TOP_K
 ):
     """
-    Advanced Hybrid RAG retrieval.
+    Advanced Hybrid RAG.
 
-    Retrieval signals:
+    Uses multiple retrieval signals:
 
     1. Full natural-language semantic search
     2. Condensed concept semantic search
-    3. Lightweight lexical matching
-    4. Reciprocal Rank Fusion (RRF)
+    3. Definition-oriented semantic search
+    4. Keyword matching
+    5. Phrase matching
+    6. Reciprocal Rank Fusion (RRF)
 
-    Semantic retrieval is the PRIMARY signal.
-    Keyword matching is only a supporting signal.
+    Exact question wording is NOT required.
 
-    Exact wording is NOT required.
+    Example:
 
-    Examples:
+        "momentum"
+        "what is momentum?"
+        "define momentum"
+        "explain momentum"
 
-        What is momentum?
-        Define momentum
-        Explain momentum
-        What quantity represents motion?
-        Which quantity depends on mass and velocity?
-
-    can all retrieve semantically related textbook content.
+    can retrieve the same relevant textbook content.
     """
 
     index, metadata = load_subject_index(subject)
@@ -250,7 +248,7 @@ def retrieve_context(
 
 
     # =====================================================
-    # NORMALIZE QUERY
+    # QUERY NORMALIZATION
     # =====================================================
 
     stop_words = {
@@ -293,111 +291,73 @@ def retrieve_context(
         "or",
         "please",
         "give",
+        "meaning",
     }
 
-    all_query_tokens = _normalize_words(
+    raw_words = _normalize_words(
         question
     )
 
     query_words = [
         word
-        for word in all_query_tokens
+        for word in raw_words
         if len(word) >= 3
         and word not in stop_words
     ]
 
-    # Example:
-    # "What is momentum?"
-    # -> "momentum"
-    condensed_query = " ".join(
+    concept_query = " ".join(
         query_words
     ).strip()
 
+    # Example:
+    # "What is momentum?" -> "momentum"
+    #
+    # This is NOT used as a requirement.
+    # It is simply an additional retrieval query.
 
-    # =====================================================
-    # SEMANTIC SEARCH 1
-    # FULL NATURAL-LANGUAGE QUESTION
-    # =====================================================
-
-    query_embedding = embedding_model.encode(
-        [question],
-        normalize_embeddings=True
-    )
-
-    query_embedding = np.asarray(
-        query_embedding,
-        dtype="float32"
-    )
-
-    # Wider candidate pool because current vectorstores
-    # are page-level indexes.
-    semantic_k = min(
-        max(top_k * 8, 40),
-        index.ntotal
-    )
-
-    semantic_scores,
-    semantic_indices = index.search(
-        query_embedding,
-        semantic_k
-    )
-
-    semantic_rank = {}
-    semantic_score_map = {}
-
-    for rank, (score, idx) in enumerate(
-        zip(
-            semantic_scores[0],
-            semantic_indices[0]
-        ),
-        start=1
-    ):
-
-        if idx == -1:
-            continue
-
-        idx = int(idx)
-
-        semantic_rank[idx] = rank
-        semantic_score_map[idx] = float(
-            score
+    if concept_query:
+        definition_query = (
+            f"definition and explanation of {concept_query}"
         )
+    else:
+        definition_query = question
 
 
     # =====================================================
-    # SEMANTIC SEARCH 2
-    # CONDENSED CONCEPT QUERY
+    # SEMANTIC SEARCH HELPER
     # =====================================================
 
-    condensed_rank = {}
-    condensed_score_map = {}
-
-    if (
-        condensed_query
-        and condensed_query.lower()
-        != question.lower()
+    def semantic_search(
+        query_text,
+        candidate_k
     ):
+        """
+        Run cosine-style semantic search using the
+        normalized SentenceTransformer embeddings.
+        """
 
-        condensed_embedding = embedding_model.encode(
-            [condensed_query],
+        embedding = embedding_model.encode(
+            [query_text],
             normalize_embeddings=True
         )
 
-        condensed_embedding = np.asarray(
-            condensed_embedding,
+        embedding = np.asarray(
+            embedding,
             dtype="float32"
         )
 
-        condensed_scores,
-        condensed_indices = index.search(
-            condensed_embedding,
-            semantic_k
+        scores, indices = index.search(
+            embedding,
+            candidate_k
         )
+
+        rank_map = {}
+        score_map = {}
 
         for rank, (score, idx) in enumerate(
             zip(
-                condensed_scores[0],
-                condensed_indices[0]
+                scores[0],
+                indices[0]
             ),
             start=1
         ):
@@ -407,19 +367,73 @@ def retrieve_context(
 
             idx = int(idx)
 
-            condensed_rank[idx] = rank
+            # Safety check if metadata/index counts
+            # ever become inconsistent.
+            if idx >= len(metadata):
+                continue
 
-            condensed_score_map[idx] = float(
-                score
-            )
+            rank_map[idx] = rank
+            score_map[idx] = float(score)
+
+        return rank_map, score_map
 
 
     # =====================================================
-    # LEXICAL SEARCH
-    # SECONDARY SIGNAL ONLY
+    # LARGE SEMANTIC CANDIDATE POOL
+    # =====================================================
+
+    semantic_k = min(
+        max(top_k * 8, 40),
+        index.ntotal
+    )
+
+
+    # =====================================================
+    # SEMANTIC SEARCH 1
+    # FULL QUESTION
+    # =====================================================
+
+    full_rank, full_scores = semantic_search(
+        question,
+        semantic_k
+    )
+
+
+    # =====================================================
+    # SEMANTIC SEARCH 2
+    # CONDENSED CONCEPT
+    # =====================================================
+
+    concept_rank, concept_scores = semantic_search(
+        concept_query if concept_query else question,
+        semantic_k
+    )
+
+
+    # =====================================================
+    # SEMANTIC SEARCH 3
+    # DEFINITION / EXPLANATION FORM
+    # =====================================================
+
+    definition_rank, definition_scores = semantic_search(
+        definition_query,
+        semantic_k
+    )
+
+
+    # =====================================================
+    # KEYWORD + PHRASE SEARCH
     # =====================================================
 
     lexical_scores = {}
+    phrase_scores = {}
+
+    original_question = (
+        question.strip().lower()
+    )
+
+    concept_phrase = concept_query.lower()
+
 
     for idx, item in enumerate(metadata):
 
@@ -431,56 +445,96 @@ def retrieve_context(
         if not text:
             continue
 
-        text_tokens = set(
+        text_lower = text.lower()
+
+        text_words = set(
             _normalize_words(text)
         )
 
-        matches = sum(
-            1
-            for word in query_words
-            if word in text_tokens
-        )
 
         # -------------------------------------------------
-        # BASIC SINGULAR / PLURAL SUPPORT
+        # KEYWORD MATCHES
         # -------------------------------------------------
 
-        if matches == 0:
+        matches = 0
 
-            for word in query_words:
+        for word in query_words:
 
-                if len(word) <= 3:
-                    continue
+            if word in text_words:
 
-                singular = None
+                matches += 1
+                continue
 
-                if word.endswith("ies"):
-                    singular = (
-                        word[:-3]
-                        + "y"
-                    )
 
-                elif word.endswith("es"):
-                    singular = word[:-2]
-
-                elif word.endswith("s"):
-                    singular = word[:-1]
+            # Basic singular/plural support
+            if len(word) > 3:
 
                 if (
-                    singular
-                    and singular in text_tokens
+                    word.endswith("ies")
+                    and word[:-3] + "y"
+                    in text_words
                 ):
                     matches += 1
 
-        if matches:
+                elif (
+                    word.endswith("es")
+                    and word[:-2]
+                    in text_words
+                ):
+                    matches += 1
+
+                elif (
+                    word.endswith("s")
+                    and word[:-1]
+                    in text_words
+                ):
+                    matches += 1
+
+
+        if matches > 0:
             lexical_scores[idx] = matches
 
+
+        # -------------------------------------------------
+        # PHRASE MATCH
+        # -------------------------------------------------
+
+        phrase_bonus = 0
+
+
+        if (
+            original_question
+            and original_question
+            in text_lower
+        ):
+
+            phrase_bonus += 2
+
+
+        if (
+            concept_phrase
+            and len(query_words) >= 2
+            and concept_phrase
+            in text_lower
+        ):
+
+            phrase_bonus += 2
+
+
+        if phrase_bonus > 0:
+            phrase_scores[idx] = phrase_bonus
+
+
+    # -----------------------------------------------------
+    # SORT LEXICAL RESULTS
+    # -----------------------------------------------------
 
     lexical_sorted = sorted(
         lexical_scores.items(),
         key=lambda item: item[1],
         reverse=True
     )
+
 
     lexical_rank = {
         idx: rank
@@ -495,78 +549,141 @@ def retrieve_context(
     # RECIPROCAL RANK FUSION
     # =====================================================
 
-    # Semantic = strongest
-    # Condensed semantic = second strongest
-    # Keyword = supporting signal
-
     RRF_K = 60
 
-    candidates = set(
-        semantic_rank
+    candidates = set()
+
+    candidates.update(
+        full_rank.keys()
     )
 
     candidates.update(
-        condensed_rank
+        concept_rank.keys()
     )
 
     candidates.update(
-        lexical_rank
+        definition_rank.keys()
     )
+
+    candidates.update(
+        lexical_rank.keys()
+    )
+
+    candidates.update(
+        phrase_scores.keys()
+    )
+
 
     fused_scores = {}
+
 
     for idx in candidates:
 
         score = 0.0
 
-        # Full question semantic ranking
-        if idx in semantic_rank:
+
+        # -------------------------------------------------
+        # Full-question semantic ranking
+        # Strongest signal
+        # -------------------------------------------------
+
+        if idx in full_rank:
 
             score += (
-                0.60
+                0.40
                 /
                 (
                     RRF_K
-                    + semantic_rank[idx]
+                    +
+                    full_rank[idx]
                 )
             )
 
-        # Condensed concept ranking
-        if idx in condensed_rank:
+
+        # -------------------------------------------------
+        # Condensed concept semantic ranking
+        # -------------------------------------------------
+
+        if idx in concept_rank:
 
             score += (
                 0.25
                 /
                 (
                     RRF_K
-                    + condensed_rank[idx]
+                    +
+                    concept_rank[idx]
                 )
             )
 
-        # Lexical ranking
-        if idx in lexical_rank:
+
+        # -------------------------------------------------
+        # Definition semantic ranking
+        # -------------------------------------------------
+
+        if idx in definition_rank:
 
             score += (
-                0.15
+                0.20
                 /
                 (
                     RRF_K
-                    + lexical_rank[idx]
+                    +
+                    definition_rank[idx]
                 )
             )
+
+
+        # -------------------------------------------------
+        # Keyword ranking
+        # Secondary only
+        # -------------------------------------------------
+
+        if idx in lexical_rank:
+
+            score += (
+                0.10
+                /
+                (
+                    RRF_K
+                    +
+                    lexical_rank[idx]
+                )
+            )
+
+
+        # -------------------------------------------------
+        # Exact phrase bonus
+        # Small bonus only
+        # -------------------------------------------------
+
+        if idx in phrase_scores:
+
+            score += (
+                0.05
+                *
+                min(
+                    phrase_scores[idx],
+                    2
+                )
+                /
+                2
+            )
+
 
         fused_scores[idx] = score
 
 
     # =====================================================
-    # FINAL RANKING
+    # FINAL SORT
     # =====================================================
 
     ranked_indices = sorted(
-        fused_scores,
+        fused_scores.keys(),
         key=lambda idx: fused_scores[idx],
         reverse=True
     )
+
 
     if not ranked_indices:
         return []
@@ -578,27 +695,40 @@ def retrieve_context(
 
     results = []
 
+
     for idx in ranked_indices[:top_k]:
 
         result = metadata[idx].copy()
+
 
         result["score"] = float(
             fused_scores[idx]
         )
 
+
         result["semantic_score"] = float(
-            semantic_score_map.get(
+            full_scores.get(
                 idx,
                 0.0
             )
         )
 
-        result["condensed_semantic_score"] = float(
-            condensed_score_map.get(
+
+        result["concept_semantic_score"] = float(
+            concept_scores.get(
                 idx,
                 0.0
             )
         )
+
+
+        result["definition_semantic_score"] = float(
+            definition_scores.get(
+                idx,
+                0.0
+            )
+        )
+
 
         result["keyword_score"] = float(
             lexical_scores.get(
@@ -607,9 +737,19 @@ def retrieve_context(
             )
         )
 
+
+        result["phrase_score"] = float(
+            phrase_scores.get(
+                idx,
+                0
+            )
+        )
+
+
         result["_index"] = int(
             idx
         )
+
 
         results.append(
             result
@@ -620,40 +760,52 @@ def retrieve_context(
     # RELEVANCE GATE
     # =====================================================
 
-    # Important:
+    # FAISS always returns nearest neighbours.
+    # So this prevents totally unrelated questions
+    # from being sent to Groq.
     #
-    # FAISS always returns nearest vectors.
-    # Therefore completely unrelated queries need a gate.
-    #
-    # This threshold is deliberately permissive so that
-    # paraphrases and natural-language questions are not
-    # rejected.
+    # This threshold is intentionally permissive
+    # because our vectorstore is semantic/page-level.
 
     best = results[0]
 
-    best_semantic = best[
+
+    best_full = best[
         "semantic_score"
     ]
 
-    best_condensed = best[
-        "condensed_semantic_score"
+
+    best_concept = best[
+        "concept_semantic_score"
     ]
+
+
+    best_definition = best[
+        "definition_semantic_score"
+    ]
+
 
     best_keyword = best[
         "keyword_score"
     ]
 
-    MIN_SEMANTIC_SCORE = 0.20
 
-    # A result is accepted if either semantic route
-    # has meaningful relevance OR lexical evidence exists.
+    MIN_SEMANTIC_SCORE = 0.20
+    MIN_DEFINITION_SCORE = 0.20
+
 
     if (
-        best_semantic < MIN_SEMANTIC_SCORE
-        and best_condensed < MIN_SEMANTIC_SCORE
-        and best_keyword <= 0
+        best_full < MIN_SEMANTIC_SCORE
+        and
+        best_concept < MIN_SEMANTIC_SCORE
+        and
+        best_definition < MIN_DEFINITION_SCORE
+        and
+        best_keyword <= 0
     ):
+
         return []
+
 
     return results
 
@@ -674,6 +826,7 @@ def generate_answer(
         TOP_K
     )
 
+
     if not results:
 
         return (
@@ -681,11 +834,12 @@ def generate_answer(
         ), []
 
 
-    # =====================================================
+    # -----------------------------------------------------
     # BUILD TEXTBOOK CONTEXT
-    # =====================================================
+    # -----------------------------------------------------
 
     context_parts = []
+
 
     for result in results:
 
@@ -693,14 +847,17 @@ def generate_answer(
             result
         )
 
+
         text = result.get(
             "text",
             ""
         )
 
+
         context_parts.append(
             f"SOURCE PAGE: {page}\n{text}"
         )
+
 
     context = "\n\n".join(
         context_parts
@@ -804,6 +961,7 @@ Do not introduce any information not present
 in the textbook context.
 """
 
+
     elif answer_mode == "Summary":
 
         mode_instruction = """
@@ -828,6 +986,7 @@ Use 4-6 sentences or short bullet points.
 
 Use ONLY information from the textbook context.
 """
+
 
     else:
 
@@ -922,7 +1081,9 @@ points of the answer.
         temperature=0.1
     )
 
+
     answer = response.choices[0].message.content.strip()
+
 
     return answer, results
 
@@ -1353,6 +1514,7 @@ div[data-testid="stExpander"] {
 </style>
 """
 
+
 st.markdown(
     CUSTOM_CSS,
     unsafe_allow_html=True
@@ -1465,7 +1627,7 @@ with col_step2:
 
 
 # =========================================================
-# STEP 3 — QUESTION INPUT
+# STEP 3 — QUESTION INPUT & QUICK SUGGESTION CHIPS
 # =========================================================
 
 st.markdown(
@@ -1479,7 +1641,7 @@ st.markdown(
 )
 
 
-# Suggested question chips
+# Suggested question chips for active subject
 active_meta = SUBJECT_META.get(
     selected_subject_name,
     {}
@@ -1619,12 +1781,10 @@ if ask_button:
                 )
 
 
-                # =================================================
-                # SPLIT MAIN ANSWER + IN SHORT
-                # =================================================
-
+                # Split answer and 'In Short' summary if present
                 main_answer = answer
                 in_short_summary = None
+
 
                 if "### In Short:" in answer:
 
@@ -1683,7 +1843,7 @@ if ask_button:
 
 
                 # =================================================
-                # IN SHORT
+                # HIGH-YIELD REVISION CALLOUT
                 # =================================================
 
                 if in_short_summary:
