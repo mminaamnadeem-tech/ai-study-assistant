@@ -197,17 +197,24 @@ def _keyword_score(query_words, text):
 
 
 
-def retrieve_context(question, subject, top_k=TOP_K):
+def retrieve_context(
+    question,
+    subject,
+    top_k=TOP_K
+):
     """
-    Advanced semantic-first hybrid retrieval.
+    Advanced multi-query semantic hybrid retrieval.
 
-    The query is searched in three semantic forms:
-    1) the original natural-language question
-    2) a concept-only query
-    3) a definition/explanation query
-
-    Keyword matching is only a secondary reranking signal.
-    Exact wording is never required.
+    Important design:
+    - The original natural-language question is embedded.
+    - A condensed concept query is embedded.
+    - A definition/explanation query is embedded.
+    - Candidates are merged by their ACTUAL semantic similarity scores,
+      not only by rank. This prevents a strong "momentum" match from being
+      pushed down just because it was not highly ranked for the longer
+      wording "what is momentum?".
+    - Keywords are only a supporting signal.
+    - Exact wording is never required.
     """
 
     index, metadata = load_subject_index(subject)
@@ -218,6 +225,7 @@ def retrieve_context(question, subject, top_k=TOP_K):
     # -----------------------------------------------------
     # Query normalization
     # -----------------------------------------------------
+
     stop_words = {
         "what", "what's", "is", "are", "the", "a", "an",
         "of", "to", "in", "on", "for", "from", "how", "why",
@@ -228,23 +236,28 @@ def retrieve_context(question, subject, top_k=TOP_K):
     }
 
     raw_words = _normalize_words(question)
+
     query_words = [
-        word for word in raw_words
+        word
+        for word in raw_words
         if len(word) >= 3 and word not in stop_words
     ]
 
     concept_query = " ".join(query_words).strip()
 
     if concept_query:
-        definition_query = f"definition explanation of {concept_query}"
+        definition_query = (
+            f"definition explanation concept of {concept_query}"
+        )
     else:
         definition_query = question
 
     # -----------------------------------------------------
     # Semantic search helper
     # -----------------------------------------------------
+
     candidate_k = min(
-        max(top_k * 8, 40),
+        max(top_k * 10, 50),
         index.ntotal
     )
 
@@ -253,19 +266,22 @@ def retrieve_context(question, subject, top_k=TOP_K):
             [query_text],
             normalize_embeddings=True
         )
-        embedding = np.asarray(embedding, dtype="float32")
+
+        embedding = np.asarray(
+            embedding,
+            dtype="float32"
+        )
 
         scores, indices = index.search(
             embedding,
             candidate_k
         )
 
-        rank_map = {}
         score_map = {}
 
-        for rank, (score, idx) in enumerate(
-            zip(scores[0], indices[0]),
-            start=1
+        for score, idx in zip(
+            scores[0],
+            indices[0]
         ):
             if idx == -1:
                 continue
@@ -275,38 +291,29 @@ def retrieve_context(question, subject, top_k=TOP_K):
             if idx >= len(metadata):
                 continue
 
-            rank_map[idx] = rank
             score_map[idx] = float(score)
 
-        return rank_map, score_map
+        return score_map
 
     # -----------------------------------------------------
-    # 1. Full natural-language semantic search
+    # Run 3 semantic queries
     # -----------------------------------------------------
-    full_rank, full_score_map = semantic_search(question)
 
-    # -----------------------------------------------------
-    # 2. Concept semantic search
-    # -----------------------------------------------------
-    concept_rank, concept_score_map = semantic_search(
+    full_scores = semantic_search(question)
+
+    concept_scores = semantic_search(
         concept_query if concept_query else question
     )
 
-    # -----------------------------------------------------
-    # 3. Definition/explanation semantic search
-    # -----------------------------------------------------
-    definition_rank, definition_score_map = semantic_search(
+    definition_scores = semantic_search(
         definition_query
     )
 
     # -----------------------------------------------------
-    # 4. Lexical evidence
+    # Lexical evidence
     # -----------------------------------------------------
-    keyword_scores = {}
-    phrase_scores = {}
 
-    full_question_lower = question.strip().lower()
-    concept_lower = concept_query.lower()
+    lexical_scores = {}
 
     for idx, item in enumerate(metadata):
         text = item.get("text", "")
@@ -315,7 +322,9 @@ def retrieve_context(question, subject, top_k=TOP_K):
             continue
 
         text_lower = text.lower()
-        text_words = set(_normalize_words(text))
+        text_words = set(
+            _normalize_words(text)
+        )
 
         matches = 0
 
@@ -324,146 +333,123 @@ def retrieve_context(question, subject, top_k=TOP_K):
                 matches += 1
                 continue
 
-            # Lightweight singular/plural matching.
             if len(word) > 3:
-                if word.endswith("ies") and word[:-3] + "y" in text_words:
-                    matches += 1
-                elif word.endswith("es") and word[:-2] in text_words:
-                    matches += 1
-                elif word.endswith("s") and word[:-1] in text_words:
+                singular = None
+
+                if word.endswith("ies"):
+                    singular = word[:-3] + "y"
+                elif word.endswith("es"):
+                    singular = word[:-2]
+                elif word.endswith("s"):
+                    singular = word[:-1]
+
+                if singular and singular in text_words:
                     matches += 1
 
         if matches:
-            keyword_scores[idx] = matches
+            lexical_scores[idx] = matches
 
-        phrase_bonus = 0
-
-        if (
-            len(full_question_lower) >= 4
-            and full_question_lower in text_lower
-        ):
-            phrase_bonus += 2
-
-        if (
-            len(query_words) >= 2
-            and concept_lower
-            and concept_lower in text_lower
-        ):
-            phrase_bonus += 2
-
-        if phrase_bonus:
-            phrase_scores[idx] = phrase_bonus
-
-    # -----------------------------------------------------
-    # Keyword ranking
-    # -----------------------------------------------------
-    keyword_sorted = sorted(
-        keyword_scores.items(),
-        key=lambda x: x[1],
-        reverse=True
+    max_keyword = max(
+        lexical_scores.values(),
+        default=1
     )
 
-    keyword_rank = {
-        idx: rank
-        for rank, (idx, _) in enumerate(keyword_sorted, start=1)
-    }
-
     # -----------------------------------------------------
-    # RRF fusion
+    # Merge every semantic candidate
     # -----------------------------------------------------
-    rrf_k = 60.0
 
-    candidates = set(full_rank)
-    candidates.update(concept_rank)
-    candidates.update(definition_rank)
-    candidates.update(keyword_rank)
-    candidates.update(phrase_scores)
+    candidates = set(full_scores)
+    candidates.update(concept_scores)
+    candidates.update(definition_scores)
+    candidates.update(lexical_scores)
 
-    fused = {}
-
-    for idx in candidates:
-        score = 0.0
-
-        if idx in full_rank:
-            score += 0.45 / (rrf_k + full_rank[idx])
-
-        if idx in concept_rank:
-            score += 0.25 / (rrf_k + concept_rank[idx])
-
-        if idx in definition_rank:
-            score += 0.20 / (rrf_k + definition_rank[idx])
-
-        if idx in keyword_rank:
-            score += 0.10 / (rrf_k + keyword_rank[idx])
-
-        if idx in phrase_scores:
-            score += 0.0025 * min(phrase_scores[idx], 2)
-
-        fused[idx] = score
-
-    ranked = sorted(
-        fused,
-        key=fused.get,
-        reverse=True
-    )
-
-    if not ranked:
+    if not candidates:
         return []
 
-    # -----------------------------------------------------
-    # Build results
-    # -----------------------------------------------------
-    results = []
+    ranked_results = []
 
-    for idx in ranked[:top_k]:
+    for idx in candidates:
+        full = full_scores.get(idx, 0.0)
+        concept = concept_scores.get(idx, 0.0)
+        definition = definition_scores.get(idx, 0.0)
+
+        keyword = (
+            lexical_scores.get(idx, 0) / max_keyword
+            if max_keyword > 0
+            else 0.0
+        )
+
+        # -------------------------------------------------
+        # KEY FIX:
+        # Use actual similarity values rather than RRF-only rank.
+        # A strong concept match can therefore win even when the
+        # longer question wording ranks differently.
+        # -------------------------------------------------
+
+        semantic_hybrid = (
+            0.50 * full
+            + 0.30 * concept
+            + 0.20 * definition
+        )
+
+        # Small lexical boost; keywords NEVER dominate semantics.
+        final_score = (
+            0.90 * semantic_hybrid
+            + 0.10 * keyword
+        )
+
         result = metadata[idx].copy()
 
-        result["score"] = float(fused[idx])
-        result["semantic_score"] = float(
-            full_score_map.get(idx, 0.0)
-        )
-        result["concept_semantic_score"] = float(
-            concept_score_map.get(idx, 0.0)
-        )
-        result["definition_semantic_score"] = float(
-            definition_score_map.get(idx, 0.0)
-        )
-        result["keyword_score"] = float(
-            keyword_scores.get(idx, 0)
-        )
-        result["phrase_score"] = float(
-            phrase_scores.get(idx, 0)
-        )
+        result["score"] = float(final_score)
+        result["semantic_score"] = float(full)
+        result["concept_semantic_score"] = float(concept)
+        result["definition_semantic_score"] = float(definition)
+        result["keyword_score"] = float(keyword)
         result["_index"] = int(idx)
 
-        results.append(result)
+        ranked_results.append(result)
+
+    ranked_results.sort(
+        key=lambda item: item["score"],
+        reverse=True
+    )
 
     # -----------------------------------------------------
     # Relevance gate
     # -----------------------------------------------------
-    # Do not use a hard keyword requirement.
-    # Semantic evidence alone is sufficient.
-    best = results[0]
+    # Because the three-query approach is much stronger than the old
+    # single-query gate, use the BEST semantic evidence from any query.
 
-    best_full_semantic = best["semantic_score"]
-    best_concept_semantic = best["concept_semantic_score"]
-    best_definition_semantic = best["definition_semantic_score"]
-    best_keyword = best["keyword_score"]
-
-    # Permissive threshold for paraphrases.
-    min_semantic = 0.18
-
-    relevant = (
-        best_full_semantic >= min_semantic
-        or best_concept_semantic >= min_semantic
-        or best_definition_semantic >= min_semantic
-        or best_keyword > 0
+    best_full = max(
+        (item["semantic_score"] for item in ranked_results),
+        default=0.0
     )
 
-    if not relevant:
+    best_concept = max(
+        (item["concept_semantic_score"] for item in ranked_results),
+        default=0.0
+    )
+
+    best_definition = max(
+        (item["definition_semantic_score"] for item in ranked_results),
+        default=0.0
+    )
+
+    best_keyword = max(
+        (item["keyword_score"] for item in ranked_results),
+        default=0.0
+    )
+
+    MIN_SEMANTIC_SCORE = 0.20
+
+    if (
+        max(best_full, best_concept, best_definition)
+        < MIN_SEMANTIC_SCORE
+        and best_keyword <= 0.0
+    ):
         return []
 
-    return results
+    return ranked_results[:top_k]
 
 
 # =========================================================
