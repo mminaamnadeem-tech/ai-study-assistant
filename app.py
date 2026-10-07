@@ -171,74 +171,43 @@ def get_page_number(item):
 
 
 # =========================================================
-# RETRIEVAL HELPERS
+# RETRIEVAL
 # =========================================================
 
 def _normalize_words(text):
-    """Return normalized alphanumeric tokens for lexical search."""
-    return re.findall(
-        r"\b[a-zA-Z0-9]+\b",
-        text.lower()
-    )
+    """Return normalized alphanumeric tokens for lightweight lexical search."""
+    return re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
 
 
 def _keyword_score(query_words, text):
     """Score lexical overlap, with a small phrase bonus."""
-    text_words = set(
-        _normalize_words(text)
-    )
+    text_words = set(_normalize_words(text))
 
     if not query_words or not text_words:
         return 0
 
-    matches = sum(
-        1
-        for word in query_words
-        if word in text_words
-    )
+    matches = sum(1 for word in query_words if word in text_words)
 
+    # Phrase bonus rewards direct multi-word matches without making
+    # exact wording mandatory.
     phrase = " ".join(query_words)
-
-    phrase_bonus = (
-        2
-        if phrase and phrase in text.lower()
-        else 0
-    )
+    phrase_bonus = 2 if phrase and phrase in text.lower() else 0
 
     return matches + phrase_bonus
 
 
-# =========================================================
-# ADVANCED HYBRID RAG RETRIEVAL
-# =========================================================
 
-def retrieve_context(
-    question,
-    subject,
-    top_k=TOP_K
-):
+def retrieve_context(question, subject, top_k=TOP_K):
     """
-    Advanced Hybrid RAG.
+    Advanced semantic-first hybrid retrieval.
 
-    Uses multiple retrieval signals:
+    The query is searched in three semantic forms:
+    1) the original natural-language question
+    2) a concept-only query
+    3) a definition/explanation query
 
-    1. Full natural-language semantic search
-    2. Condensed concept semantic search
-    3. Definition-oriented semantic search
-    4. Keyword matching
-    5. Phrase matching
-    6. Reciprocal Rank Fusion (RRF)
-
-    Exact question wording is NOT required.
-
-    Example:
-
-        "momentum"
-        "what is momentum?"
-        "define momentum"
-        "explain momentum"
-
-    can retrieve the same relevant textbook content.
+    Keyword matching is only a secondary reranking signal.
+    Exact wording is never required.
     """
 
     index, metadata = load_subject_index(subject)
@@ -246,105 +215,45 @@ def retrieve_context(
     if index.ntotal == 0 or not metadata:
         return []
 
-
-    # =====================================================
-    # QUERY NORMALIZATION
-    # =====================================================
-
+    # -----------------------------------------------------
+    # Query normalization
+    # -----------------------------------------------------
     stop_words = {
-        "what",
-        "what's",
-        "is",
-        "are",
-        "the",
-        "a",
-        "an",
-        "of",
-        "to",
-        "in",
-        "on",
-        "for",
-        "from",
-        "how",
-        "why",
-        "when",
-        "where",
-        "which",
-        "who",
-        "does",
-        "do",
-        "did",
-        "can",
-        "could",
-        "would",
-        "should",
-        "explain",
-        "define",
-        "definition",
-        "describe",
-        "state",
-        "tell",
-        "me",
-        "about",
-        "with",
-        "and",
-        "or",
-        "please",
-        "give",
-        "meaning",
+        "what", "what's", "is", "are", "the", "a", "an",
+        "of", "to", "in", "on", "for", "from", "how", "why",
+        "when", "where", "which", "who", "does", "do", "did",
+        "can", "could", "would", "should", "explain", "define",
+        "definition", "describe", "state", "tell", "me", "about",
+        "with", "and", "or", "please", "give", "meaning"
     }
 
-    raw_words = _normalize_words(
-        question
-    )
-
+    raw_words = _normalize_words(question)
     query_words = [
-        word
-        for word in raw_words
-        if len(word) >= 3
-        and word not in stop_words
+        word for word in raw_words
+        if len(word) >= 3 and word not in stop_words
     ]
 
-    concept_query = " ".join(
-        query_words
-    ).strip()
-
-    # Example:
-    # "What is momentum?" -> "momentum"
-    #
-    # This is NOT used as a requirement.
-    # It is simply an additional retrieval query.
+    concept_query = " ".join(query_words).strip()
 
     if concept_query:
-        definition_query = (
-            f"definition and explanation of {concept_query}"
-        )
+        definition_query = f"definition explanation of {concept_query}"
     else:
         definition_query = question
 
+    # -----------------------------------------------------
+    # Semantic search helper
+    # -----------------------------------------------------
+    candidate_k = min(
+        max(top_k * 8, 40),
+        index.ntotal
+    )
 
-    # =====================================================
-    # SEMANTIC SEARCH HELPER
-    # =====================================================
-
-    def semantic_search(
-        query_text,
-        candidate_k
-    ):
-        """
-        Run cosine-style semantic search using the
-        normalized SentenceTransformer embeddings.
-        """
-
+    def semantic_search(query_text):
         embedding = embedding_model.encode(
             [query_text],
             normalize_embeddings=True
         )
-
-        embedding = np.asarray(
-            embedding,
-            dtype="float32"
-        )
+        embedding = np.asarray(embedding, dtype="float32")
 
         scores, indices = index.search(
             embedding,
@@ -355,20 +264,14 @@ def retrieve_context(
         score_map = {}
 
         for rank, (score, idx) in enumerate(
-            zip(
-                scores[0],
-                indices[0]
-            ),
+            zip(scores[0], indices[0]),
             start=1
         ):
-
             if idx == -1:
                 continue
 
             idx = int(idx)
 
-            # Safety check if metadata/index counts
-            # ever become inconsistent.
             if idx >= len(metadata):
                 continue
 
@@ -377,435 +280,188 @@ def retrieve_context(
 
         return rank_map, score_map
 
+    # -----------------------------------------------------
+    # 1. Full natural-language semantic search
+    # -----------------------------------------------------
+    full_rank, full_score_map = semantic_search(question)
 
-    # =====================================================
-    # LARGE SEMANTIC CANDIDATE POOL
-    # =====================================================
-
-    semantic_k = min(
-        max(top_k * 8, 40),
-        index.ntotal
+    # -----------------------------------------------------
+    # 2. Concept semantic search
+    # -----------------------------------------------------
+    concept_rank, concept_score_map = semantic_search(
+        concept_query if concept_query else question
     )
 
-
-    # =====================================================
-    # SEMANTIC SEARCH 1
-    # FULL QUESTION
-    # =====================================================
-
-    full_rank, full_scores = semantic_search(
-        question,
-        semantic_k
+    # -----------------------------------------------------
+    # 3. Definition/explanation semantic search
+    # -----------------------------------------------------
+    definition_rank, definition_score_map = semantic_search(
+        definition_query
     )
 
-
-    # =====================================================
-    # SEMANTIC SEARCH 2
-    # CONDENSED CONCEPT
-    # =====================================================
-
-    concept_rank, concept_scores = semantic_search(
-        concept_query if concept_query else question,
-        semantic_k
-    )
-
-
-    # =====================================================
-    # SEMANTIC SEARCH 3
-    # DEFINITION / EXPLANATION FORM
-    # =====================================================
-
-    definition_rank, definition_scores = semantic_search(
-        definition_query,
-        semantic_k
-    )
-
-
-    # =====================================================
-    # KEYWORD + PHRASE SEARCH
-    # =====================================================
-
-    lexical_scores = {}
+    # -----------------------------------------------------
+    # 4. Lexical evidence
+    # -----------------------------------------------------
+    keyword_scores = {}
     phrase_scores = {}
 
-    original_question = (
-        question.strip().lower()
-    )
-
-    concept_phrase = concept_query.lower()
-
+    full_question_lower = question.strip().lower()
+    concept_lower = concept_query.lower()
 
     for idx, item in enumerate(metadata):
-
-        text = item.get(
-            "text",
-            ""
-        )
+        text = item.get("text", "")
 
         if not text:
             continue
 
         text_lower = text.lower()
-
-        text_words = set(
-            _normalize_words(text)
-        )
-
-
-        # -------------------------------------------------
-        # KEYWORD MATCHES
-        # -------------------------------------------------
+        text_words = set(_normalize_words(text))
 
         matches = 0
 
         for word in query_words:
-
             if word in text_words:
-
                 matches += 1
                 continue
 
-
-            # Basic singular/plural support
+            # Lightweight singular/plural matching.
             if len(word) > 3:
-
-                if (
-                    word.endswith("ies")
-                    and word[:-3] + "y"
-                    in text_words
-                ):
+                if word.endswith("ies") and word[:-3] + "y" in text_words:
+                    matches += 1
+                elif word.endswith("es") and word[:-2] in text_words:
+                    matches += 1
+                elif word.endswith("s") and word[:-1] in text_words:
                     matches += 1
 
-                elif (
-                    word.endswith("es")
-                    and word[:-2]
-                    in text_words
-                ):
-                    matches += 1
-
-                elif (
-                    word.endswith("s")
-                    and word[:-1]
-                    in text_words
-                ):
-                    matches += 1
-
-
-        if matches > 0:
-            lexical_scores[idx] = matches
-
-
-        # -------------------------------------------------
-        # PHRASE MATCH
-        # -------------------------------------------------
+        if matches:
+            keyword_scores[idx] = matches
 
         phrase_bonus = 0
 
-
         if (
-            original_question
-            and original_question
-            in text_lower
+            len(full_question_lower) >= 4
+            and full_question_lower in text_lower
         ):
-
             phrase_bonus += 2
 
-
         if (
-            concept_phrase
-            and len(query_words) >= 2
-            and concept_phrase
-            in text_lower
+            len(query_words) >= 2
+            and concept_lower
+            and concept_lower in text_lower
         ):
-
             phrase_bonus += 2
 
-
-        if phrase_bonus > 0:
+        if phrase_bonus:
             phrase_scores[idx] = phrase_bonus
 
-
     # -----------------------------------------------------
-    # SORT LEXICAL RESULTS
+    # Keyword ranking
     # -----------------------------------------------------
-
-    lexical_sorted = sorted(
-        lexical_scores.items(),
-        key=lambda item: item[1],
+    keyword_sorted = sorted(
+        keyword_scores.items(),
+        key=lambda x: x[1],
         reverse=True
     )
 
-
-    lexical_rank = {
+    keyword_rank = {
         idx: rank
-        for rank, (idx, _) in enumerate(
-            lexical_sorted,
-            start=1
-        )
+        for rank, (idx, _) in enumerate(keyword_sorted, start=1)
     }
 
+    # -----------------------------------------------------
+    # RRF fusion
+    # -----------------------------------------------------
+    rrf_k = 60.0
 
-    # =====================================================
-    # RECIPROCAL RANK FUSION
-    # =====================================================
+    candidates = set(full_rank)
+    candidates.update(concept_rank)
+    candidates.update(definition_rank)
+    candidates.update(keyword_rank)
+    candidates.update(phrase_scores)
 
-    RRF_K = 60
-
-    candidates = set()
-
-    candidates.update(
-        full_rank.keys()
-    )
-
-    candidates.update(
-        concept_rank.keys()
-    )
-
-    candidates.update(
-        definition_rank.keys()
-    )
-
-    candidates.update(
-        lexical_rank.keys()
-    )
-
-    candidates.update(
-        phrase_scores.keys()
-    )
-
-
-    fused_scores = {}
-
+    fused = {}
 
     for idx in candidates:
-
         score = 0.0
 
-
-        # -------------------------------------------------
-        # Full-question semantic ranking
-        # Strongest signal
-        # -------------------------------------------------
-
         if idx in full_rank:
-
-            score += (
-                0.40
-                /
-                (
-                    RRF_K
-                    +
-                    full_rank[idx]
-                )
-            )
-
-
-        # -------------------------------------------------
-        # Condensed concept semantic ranking
-        # -------------------------------------------------
+            score += 0.45 / (rrf_k + full_rank[idx])
 
         if idx in concept_rank:
-
-            score += (
-                0.25
-                /
-                (
-                    RRF_K
-                    +
-                    concept_rank[idx]
-                )
-            )
-
-
-        # -------------------------------------------------
-        # Definition semantic ranking
-        # -------------------------------------------------
+            score += 0.25 / (rrf_k + concept_rank[idx])
 
         if idx in definition_rank:
+            score += 0.20 / (rrf_k + definition_rank[idx])
 
-            score += (
-                0.20
-                /
-                (
-                    RRF_K
-                    +
-                    definition_rank[idx]
-                )
-            )
-
-
-        # -------------------------------------------------
-        # Keyword ranking
-        # Secondary only
-        # -------------------------------------------------
-
-        if idx in lexical_rank:
-
-            score += (
-                0.10
-                /
-                (
-                    RRF_K
-                    +
-                    lexical_rank[idx]
-                )
-            )
-
-
-        # -------------------------------------------------
-        # Exact phrase bonus
-        # Small bonus only
-        # -------------------------------------------------
+        if idx in keyword_rank:
+            score += 0.10 / (rrf_k + keyword_rank[idx])
 
         if idx in phrase_scores:
+            score += 0.0025 * min(phrase_scores[idx], 2)
 
-            score += (
-                0.05
-                *
-                min(
-                    phrase_scores[idx],
-                    2
-                )
-                /
-                2
-            )
+        fused[idx] = score
 
-
-        fused_scores[idx] = score
-
-
-    # =====================================================
-    # FINAL SORT
-    # =====================================================
-
-    ranked_indices = sorted(
-        fused_scores.keys(),
-        key=lambda idx: fused_scores[idx],
+    ranked = sorted(
+        fused,
+        key=fused.get,
         reverse=True
     )
 
-
-    if not ranked_indices:
+    if not ranked:
         return []
 
-
-    # =====================================================
-    # BUILD FINAL RESULTS
-    # =====================================================
-
+    # -----------------------------------------------------
+    # Build results
+    # -----------------------------------------------------
     results = []
 
-
-    for idx in ranked_indices[:top_k]:
-
+    for idx in ranked[:top_k]:
         result = metadata[idx].copy()
 
-
-        result["score"] = float(
-            fused_scores[idx]
-        )
-
-
+        result["score"] = float(fused[idx])
         result["semantic_score"] = float(
-            full_scores.get(
-                idx,
-                0.0
-            )
+            full_score_map.get(idx, 0.0)
         )
-
-
         result["concept_semantic_score"] = float(
-            concept_scores.get(
-                idx,
-                0.0
-            )
+            concept_score_map.get(idx, 0.0)
         )
-
-
         result["definition_semantic_score"] = float(
-            definition_scores.get(
-                idx,
-                0.0
-            )
+            definition_score_map.get(idx, 0.0)
         )
-
-
         result["keyword_score"] = float(
-            lexical_scores.get(
-                idx,
-                0
-            )
+            keyword_scores.get(idx, 0)
         )
-
-
         result["phrase_score"] = float(
-            phrase_scores.get(
-                idx,
-                0
-            )
+            phrase_scores.get(idx, 0)
         )
+        result["_index"] = int(idx)
 
+        results.append(result)
 
-        result["_index"] = int(
-            idx
-        )
-
-
-        results.append(
-            result
-        )
-
-
-    # =====================================================
-    # RELEVANCE GATE
-    # =====================================================
-
-    # FAISS always returns nearest neighbours.
-    # So this prevents totally unrelated questions
-    # from being sent to Groq.
-    #
-    # This threshold is intentionally permissive
-    # because our vectorstore is semantic/page-level.
-
+    # -----------------------------------------------------
+    # Relevance gate
+    # -----------------------------------------------------
+    # Do not use a hard keyword requirement.
+    # Semantic evidence alone is sufficient.
     best = results[0]
 
+    best_full_semantic = best["semantic_score"]
+    best_concept_semantic = best["concept_semantic_score"]
+    best_definition_semantic = best["definition_semantic_score"]
+    best_keyword = best["keyword_score"]
 
-    best_full = best[
-        "semantic_score"
-    ]
+    # Permissive threshold for paraphrases.
+    min_semantic = 0.18
 
+    relevant = (
+        best_full_semantic >= min_semantic
+        or best_concept_semantic >= min_semantic
+        or best_definition_semantic >= min_semantic
+        or best_keyword > 0
+    )
 
-    best_concept = best[
-        "concept_semantic_score"
-    ]
-
-
-    best_definition = best[
-        "definition_semantic_score"
-    ]
-
-
-    best_keyword = best[
-        "keyword_score"
-    ]
-
-
-    MIN_SEMANTIC_SCORE = 0.20
-    MIN_DEFINITION_SCORE = 0.20
-
-
-    if (
-        best_full < MIN_SEMANTIC_SCORE
-        and
-        best_concept < MIN_SEMANTIC_SCORE
-        and
-        best_definition < MIN_DEFINITION_SCORE
-        and
-        best_keyword <= 0
-    ):
-
+    if not relevant:
         return []
-
 
     return results
 
@@ -826,13 +482,11 @@ def generate_answer(
         TOP_K
     )
 
-
     if not results:
 
         return (
             "I couldn't find this information in the selected textbook."
         ), []
-
 
     # -----------------------------------------------------
     # BUILD TEXTBOOK CONTEXT
@@ -840,29 +494,22 @@ def generate_answer(
 
     context_parts = []
 
-
     for result in results:
 
-        page = get_page_number(
-            result
-        )
-
+        page = get_page_number(result)
 
         text = result.get(
             "text",
             ""
         )
 
-
         context_parts.append(
             f"SOURCE PAGE: {page}\n{text}"
         )
 
-
     context = "\n\n".join(
         context_parts
     )
-
 
     # =====================================================
     # SYSTEM PROMPT
@@ -926,7 +573,6 @@ covered in the answer.
 supported by the supplied textbook context.
 """
 
-
     # =====================================================
     # ANSWER MODE
     # =====================================================
@@ -961,7 +607,6 @@ Do not introduce any information not present
 in the textbook context.
 """
 
-
     elif answer_mode == "Summary":
 
         mode_instruction = """
@@ -986,7 +631,6 @@ Use 4-6 sentences or short bullet points.
 
 Use ONLY information from the textbook context.
 """
-
 
     else:
 
@@ -1015,7 +659,6 @@ Use 4-6 sentences or short bullet points.
 
 Use ONLY information from the textbook context.
 """
-
 
     # =====================================================
     # USER PROMPT
@@ -1061,7 +704,6 @@ points of the answer.
 8. Do not use information outside the textbook context.
 """
 
-
     # =====================================================
     # GROQ REQUEST
     # =====================================================
@@ -1081,9 +723,7 @@ points of the answer.
         temperature=0.1
     )
 
-
     answer = response.choices[0].message.content.strip()
-
 
     return answer, results
 
@@ -1514,11 +1154,7 @@ div[data-testid="stExpander"] {
 </style>
 """
 
-
-st.markdown(
-    CUSTOM_CSS,
-    unsafe_allow_html=True
-)
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # =========================================================
@@ -1539,32 +1175,16 @@ st.markdown(
         <div class="hero-pill">
             <span>✨</span> AI-POWERED TEXTBOOK INTELLIGENCE · CLASS 11
         </div>
-
-        <h1 class="hero-title">
-            AI Study Assistant
-        </h1>
-
+        <h1 class="hero-title">AI Study Assistant</h1>
         <p class="hero-subtitle">
             Ask questions directly from your Class 11 textbooks. Get instant, verified,
             and zero-hallucination answers powered by high-speed Groq LPU inference.
         </p>
-
         <div class="feature-strip">
-            <div class="feature-badge">
-                ⚡ Instant Groq LPU Engine
-            </div>
-
-            <div class="feature-badge">
-                🔍 Hybrid Semantic + Keyword Search
-            </div>
-
-            <div class="feature-badge">
-                🛡️ Strict Textbook Verification
-            </div>
-
-            <div class="feature-badge">
-                📄 Page-Accurate Citations
-            </div>
+            <div class="feature-badge">⚡ Instant Groq LPU Engine</div>
+            <div class="feature-badge">🔍 Hybrid Semantic + Keyword Search</div>
+            <div class="feature-badge">🛡️ Strict Textbook Verification</div>
+            <div class="feature-badge">📄 Page-Accurate Citations</div>
         </div>
     </div>
     """,
@@ -1573,16 +1193,12 @@ st.markdown(
 
 
 # =========================================================
-# STEP 1 & STEP 2 — CLASS & SUBJECT
+# STEP 1 & STEP 2 — CLASS & SUBJECT (2-COLUMN GRID)
 # =========================================================
 
-col_step1, col_step2 = st.columns(
-    [1, 2],
-    gap="medium"
-)
+col_step1, col_step2 = st.columns([1, 2], gap="medium")
 
 with col_step1:
-
     st.markdown(
         """
         <div class="step-header-box">
@@ -1592,16 +1208,13 @@ with col_step1:
         """,
         unsafe_allow_html=True,
     )
-
     st.selectbox(
         "Select Class",
         ["Class 11"],
         label_visibility="collapsed",
     )
 
-
 with col_step2:
-
     st.markdown(
         """
         <div class="step-header-box">
@@ -1611,19 +1224,14 @@ with col_step2:
         """,
         unsafe_allow_html=True,
     )
-
     selected_subject_name = st.selectbox(
         "Select Subject",
         SUPPORTED_SUBJECTS,
-        format_func=lambda s: (
-            f"{SUBJECT_META.get(s, {}).get('icon', '📖')}  {s}"
-        ),
+        format_func=lambda s: f"{SUBJECT_META.get(s, {}).get('icon', '📖')}  {s}",
         label_visibility="collapsed",
     )
 
-    selected_subject = SUBJECT_KEYS[
-        selected_subject_name
-    ]
+    selected_subject = SUBJECT_KEYS[selected_subject_name]
 
 
 # =========================================================
@@ -1640,56 +1248,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 # Suggested question chips for active subject
-active_meta = SUBJECT_META.get(
-    selected_subject_name,
-    {}
-)
-
-prompts = active_meta.get(
-    "prompts",
-    []
-)
-
+active_meta = SUBJECT_META.get(selected_subject_name, {})
+prompts = active_meta.get("prompts", [])
 
 st.markdown(
     f'<div class="chip-title">💡 Popular {selected_subject_name} Inquiries (Click to autofill):</div>',
     unsafe_allow_html=True,
 )
 
-
-chip_cols = st.columns(
-    len(prompts)
-)
-
-for idx, prompt_text in enumerate(
-    prompts
-):
-
+chip_cols = st.columns(len(prompts))
+for idx, prompt_text in enumerate(prompts):
     with chip_cols[idx]:
-
         if st.button(
             f"📌 {prompt_text[:28]}...",
             key=f"chip_{selected_subject_name}_{idx}",
             help=prompt_text,
             use_container_width=True,
         ):
-
-            st.session_state.question_input_text = (
-                prompt_text
-            )
-
+            st.session_state.question_input_text = prompt_text
             st.rerun()
-
 
 question = st.text_area(
     "Enter your question:",
     value=st.session_state.question_input_text,
-    placeholder=(
-        f"Example: "
-        f"{prompts[0] if prompts else 'Explain photosynthesis'}"
-    ),
+    placeholder=f"Example: {prompts[0] if prompts else 'Explain photosynthesis'}",
     height=120,
     label_visibility="collapsed",
 )
@@ -1709,7 +1292,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 answer_mode = st.radio(
     "Choose answer format:",
     [
@@ -1722,10 +1304,7 @@ answer_mode = st.radio(
         "Explanation": "💡 Explanation (Step-by-Step)",
         "Summary": "⚡ Summary (High-Yield Revision)",
         "Quiz": "🎯 Quiz (Practice & MCQs)",
-    }.get(
-        mode,
-        mode
-    ),
+    }.get(mode, mode),
     label_visibility="collapsed",
 )
 
@@ -1734,11 +1313,7 @@ answer_mode = st.radio(
 # ASK BUTTON
 # =========================================================
 
-st.markdown(
-    "<div style='height: 12px;'></div>",
-    unsafe_allow_html=True
-)
-
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 ask_button = st.button(
     "🤖 Ask AI Study Assistant",
@@ -1766,7 +1341,6 @@ if ask_button:
         ):
 
             try:
-
                 start_time = time.time()
 
                 answer, sources = generate_answer(
@@ -1775,107 +1349,65 @@ if ask_button:
                     answer_mode
                 )
 
-                elapsed_time = round(
-                    time.time() - start_time,
-                    2
-                )
-
+                elapsed_time = round(time.time() - start_time, 2)
 
                 # Split answer and 'In Short' summary if present
                 main_answer = answer
                 in_short_summary = None
 
-
                 if "### In Short:" in answer:
-
-                    parts = answer.split(
-                        "### In Short:"
-                    )
-
+                    parts = answer.split("### In Short:")
                     main_answer = parts[0].strip()
                     in_short_summary = parts[1].strip()
 
-
-                # =================================================
-                # RENDER ANSWER CONTAINER
-                # =================================================
-
+                # Render Answer Container
                 st.markdown(
                     f"""
                     <div class="answer-container">
-
                         <div class="answer-top-bar">
-
                             <div class="answer-badge-group">
-
                                 <span class="answer-badge badge-subject">
-                                    {active_meta.get('icon', '📚')}
-                                    {selected_subject_name}
+                                    {active_meta.get('icon', '📚')} {selected_subject_name}
                                 </span>
-
                                 <span class="answer-badge badge-mode">
                                     {answer_mode} Mode
                                 </span>
-
                                 <span class="answer-badge badge-source">
                                     ⚡ {elapsed_time}s
                                 </span>
-
                             </div>
-
                             <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 500;">
                                 Model: {GROQ_MODEL}
                             </span>
-
                         </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
+                # Main Answer Markdown
+                st.markdown(main_answer)
 
-                # =================================================
-                # MAIN ANSWER
-                # =================================================
-
-                st.markdown(
-                    main_answer
-                )
-
-
-                # =================================================
-                # HIGH-YIELD REVISION CALLOUT
-                # =================================================
-
+                # High-Yield Revision Callout
                 if in_short_summary:
-
                     st.markdown(
                         f"""
                         <div class="in-short-banner">
-
                             <div class="in-short-title">
-                                <span>⚡</span>
-                                In Short: High-Yield Revision Summary
+                                <span>⚡</span> In Short: High-Yield Revision Summary
                             </div>
-
                             <div style="color: #e0e7ff; font-size: 0.95rem; line-height: 1.6;">
                                 {in_short_summary}
                             </div>
-
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
 
+                st.markdown("</div>", unsafe_allow_html=True)
 
-                st.markdown(
-                    "</div>",
-                    unsafe_allow_html=True
-                )
-
-
-                # =================================================
+                # -------------------------------------------------
                 # TEXTBOOK SOURCES
-                # =================================================
+                # -------------------------------------------------
 
                 if sources:
 
@@ -1890,11 +1422,7 @@ if ask_button:
                                 source
                             )
 
-                            snippet = source.get(
-                                "text",
-                                ""
-                            ).strip()
-
+                            snippet = source.get("text", "").strip()
                             clean_snippet = (
                                 snippet[:300] + "..."
                                 if len(snippet) > 300
@@ -1904,20 +1432,14 @@ if ask_button:
                             st.markdown(
                                 f"""
                                 <div class="source-citation-card">
-
-                                    <span class="source-page-tag">
-                                        📄 PAGE {page}
-                                    </span>
-
+                                    <span class="source-page-tag">📄 PAGE {page}</span>
                                     <div class="source-text-snippet">
                                         "{clean_snippet}"
                                     </div>
-
                                 </div>
                                 """,
                                 unsafe_allow_html=True,
                             )
-
 
             except Exception as e:
 
