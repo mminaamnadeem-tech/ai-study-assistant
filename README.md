@@ -342,6 +342,3 @@ When changing the app:
 4. Test both supported questions and questions whose answers are not present in the selected textbook.
 5. Do not commit secrets or unlicensed source materials.
 
-## License
-
-No license has been specified in this repository yet. Add a `LICENSE` file before distributing the project if you want to define reuse, modification, and redistribution terms. Ensure you have the appropriate rights to distribute any bundled textbook or vectorstore content.
